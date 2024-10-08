@@ -1,8 +1,7 @@
 use std::sync::{Arc, Mutex};
 use std::{num::NonZero, thread};
 
-use adw::gtk::gdk_pixbuf::{Colorspace, Pixbuf};
-use adw::{gtk, prelude::*};
+use adw::prelude::*;
 use bevy::asset::RenderAssetUsages;
 use bevy::prelude::*;
 use bevy::render::gpu_readback::{Readback, ReadbackComplete};
@@ -13,6 +12,8 @@ use bevy::render::{
     render_resource::{Extent3d, TextureDimension, TextureFormat, TextureUsages},
 };
 use bevy::window::{ExitCondition, WindowPlugin, WindowRef};
+use gtk::gdk;
+use gtk::gdk_pixbuf::{Colorspace, Pixbuf};
 use tracing::info;
 
 #[derive(Debug)]
@@ -185,44 +186,53 @@ fn run_adwaita_app(
     let state = state.clone();
     app.connect_activate(move |app| {
         let header_bar = adw::HeaderBar::new();
-        let drawing_area = gtk::DrawingArea::builder()
-            .hexpand(true)
-            .vexpand(true)
+
+        let dmabuf_builder = gdk::DmabufTextureBuilder::new();
+        dmabuf_builder.set_width(512);
+        dmabuf_builder.set_height(512);
+
+        let graphics_offload = gtk::GraphicsOffload::builder()
+            .black_background(true)
             .build();
 
-        let state = state.clone();
-        drawing_area.set_draw_func(move |_, cairo, width, height| {
-            let mut state = state.lock().unwrap();
+        // let drawing_area = gtk::DrawingArea::builder()
+        //     .hexpand(true)
+        //     .vexpand(true)
+        //     .build();
 
-            // tell Bevy what the new render dimensions should be
-            debug_assert!(width > 0);
-            debug_assert!(height > 0);
-            let _ = state
-                .send_frame_size
-                .try_send((width as u32, height as u32));
+        // let state = state.clone();
+        // drawing_area.set_draw_func(move |_, cairo, width, height| {
+        //     let mut state = state.lock().unwrap();
 
-            // receive the next frame to draw
-            // in case we have multiple frames buffered up,
-            // drop all the intermediary ones and just make a pixbuf from the last one
-            if let Some(next_frame) = state.recv_frame.try_iter().last() {
-                state.frame = Some(pixbuf_from(next_frame));
-            }
+        //     // tell Bevy what the new render dimensions should be
+        //     debug_assert!(width > 0);
+        //     debug_assert!(height > 0);
+        //     let _ = state
+        //         .send_frame_size
+        //         .try_send((width as u32, height as u32));
 
-            if let Some(frame) = state.frame.as_ref() {
-                cairo.set_source_pixbuf(frame, 0.0, 0.0);
-                cairo.paint().unwrap();
+        //     // receive the next frame to draw
+        //     // in case we have multiple frames buffered up,
+        //     // drop all the intermediary ones and just make a pixbuf from the last one
+        //     if let Some(next_frame) = state.recv_frame.try_iter().last() {
+        //         state.frame = Some(pixbuf_from(next_frame));
+        //     }
 
-                cairo.set_source_rgb(1.0, 0.0, 0.0);
-                cairo.rectangle(16.0, 16.0, 64.0, 64.0);
-                cairo.fill().unwrap();
+        //     if let Some(frame) = state.frame.as_ref() {
+        //         cairo.set_source_pixbuf(frame, 0.0, 0.0);
+        //         cairo.paint().unwrap();
 
-                info!("mom look i rendered {} x {}", frame.width(), frame.height());
-            }
-        });
+        //         cairo.set_source_rgb(1.0, 0.0, 0.0);
+        //         cairo.rectangle(16.0, 16.0, 64.0, 64.0);
+        //         cairo.fill().unwrap();
+
+        //         info!("mom look i rendered {} x {}", frame.width(), frame.height());
+        //     }
+        // });
 
         let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
         content.append(&header_bar);
-        content.append(&drawing_area);
+        content.append(&graphics_offload);
 
         let window = adw::ApplicationWindow::builder()
             .application(app)

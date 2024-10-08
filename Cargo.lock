@@ -873,6 +873,7 @@ version = "0.1.0"
 dependencies = [
  "bevy",
  "flume",
+ "gtk4",
  "libadwaita",
  "oneshot",
  "tracing",
