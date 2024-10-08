@@ -2,17 +2,16 @@ use std::sync::{Arc, Mutex};
 use std::{num::NonZero, thread};
 
 use adw::gtk::gdk_pixbuf::{Colorspace, Pixbuf};
-use adw::{glib, gtk, prelude::*};
+use adw::{gtk, prelude::*};
+use bevy::asset::RenderAssetUsages;
 use bevy::prelude::*;
+use bevy::render::gpu_readback::{Readback, ReadbackComplete};
 use bevy::render::render_asset::RenderAssets;
 use bevy::render::texture::GpuImage;
 use bevy::render::{
     camera::RenderTarget,
-    render_resource::{
-        Extent3d, TextureDescriptor, TextureDimension, TextureFormat, TextureUsages,
-    },
+    render_resource::{Extent3d, TextureDimension, TextureFormat, TextureUsages},
 };
-use bevy::render::{Render, RenderApp, RenderSet};
 use bevy::window::{ExitCondition, WindowPlugin, WindowRef};
 use tracing::info;
 
@@ -34,27 +33,57 @@ impl AdwaitaPlugin {
 
 impl Plugin for AdwaitaPlugin {
     fn build(&self, app: &mut App) {
-        let (send_close_code, recv_close_code) = oneshot::channel::<i32>();
+        // Bevy -> Adwaita
         let (send_frame, recv_frame) = flume::bounded::<Frame>(1);
+        // Adwaita -> Bevy
+        let (send_frame_size, recv_frame_size) = flume::bounded::<(u32, u32)>(1);
+        let (send_close_code, recv_close_code) = oneshot::channel::<i32>();
 
         {
             let application_id = self.application_id.clone();
-            thread::spawn(move || run_adwaita_app(application_id, send_close_code, recv_frame));
+            thread::spawn(move || {
+                run_adwaita_app(application_id, recv_frame, send_frame_size, send_close_code)
+            });
         }
 
-        app.insert_non_send_resource(RecvCloseCode(recv_close_code))
+        app.insert_resource(SendFrame(send_frame))
+            .insert_non_send_resource(RecvCloseCode(recv_close_code))
+            .insert_non_send_resource(RecvFrameSize(recv_frame_size))
             .add_systems(PreStartup, setup_render_target)
-            .add_systems(PreUpdate, exit_if_adwaita_closed)
+            .add_systems(PreUpdate, (exit_if_adwaita_closed, update_frame_size))
             .observe(change_camera_render_target);
-        let render_app = app.sub_app_mut(RenderApp);
-        render_app
-            .insert_resource(SendFrame(send_frame))
-            .add_systems(Render, send_frame_to_adwaita.after(RenderSet::Render));
     }
 }
 
+// event loop logic
+
 #[derive(Debug)]
 struct RecvCloseCode(oneshot::Receiver<i32>);
+
+fn exit_if_adwaita_closed(
+    close_code: NonSend<RecvCloseCode>,
+    mut exit_events: EventWriter<AppExit>,
+) {
+    let exit = match close_code.0.try_recv() {
+        Ok(code) => match NonZero::new(code as u8) {
+            None => AppExit::Success,
+            Some(code) => AppExit::Error(code),
+        },
+        Err(oneshot::TryRecvError::Disconnected) => AppExit::error(),
+        Err(oneshot::TryRecvError::Empty) => return,
+    };
+
+    info!("Window closed, exiting ({exit:?})");
+    exit_events.send(exit);
+}
+
+// sending frames
+
+#[derive(Debug, Clone, Deref, Resource)]
+pub struct AdwaitaRenderTarget(pub Handle<Image>);
+
+#[derive(Debug)]
+struct RecvFrameSize(flume::Receiver<(u32, u32)>);
 
 #[derive(Debug, Resource)]
 struct SendFrame(flume::Sender<Frame>);
@@ -65,34 +94,35 @@ struct Frame {
     width: u32,
 }
 
-#[derive(Debug, Clone, Resource)]
-pub struct AdwaitaRenderTarget(pub Handle<Image>);
-
 fn setup_render_target(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
     let size = Extent3d {
         width: 512,
         height: 512,
         ..default()
     };
-    let mut image = Image {
-        texture_descriptor: TextureDescriptor {
-            label: None,
-            size,
-            dimension: TextureDimension::D2,
-            format: TextureFormat::Rgba8UnormSrgb,
-            mip_level_count: 1,
-            sample_count: 1,
-            usage: TextureUsages::TEXTURE_BINDING
-                | TextureUsages::COPY_DST
-                | TextureUsages::RENDER_ATTACHMENT,
-            view_formats: &[],
-        },
-        ..default()
-    };
-    image.resize(size);
-    image.data.fill(255);
-    let render_target = images.add(image);
-    commands.insert_resource(AdwaitaRenderTarget(render_target));
+
+    let mut render_image = Image::new_fill(
+        size,
+        TextureDimension::D2,
+        &[0; 4],
+        // Cairo expects RGBA
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::RENDER_WORLD,
+    );
+    render_image.texture_descriptor.usage |=
+        TextureUsages::COPY_SRC | TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING;
+    let render_image = images.add(render_image);
+
+    commands
+        .spawn(Readback::texture(render_image.clone()))
+        .observe(|trigger: Trigger<ReadbackComplete>| {
+            info!("got readback");
+            // let data = trigger.event().0.clone();
+            // send_frame.0.try_send(Frame { data, width: 512 });
+        });
+    info!("spawned readback");
+
+    commands.insert_resource(AdwaitaRenderTarget(render_image));
 }
 
 fn change_camera_render_target(
@@ -106,22 +136,45 @@ fn change_camera_render_target(
         .expect("should exist because we are inserting this component onto this entity");
 
     if matches!(camera.target, RenderTarget::Window(WindowRef::Primary)) {
-        camera.target = RenderTarget::Image(render_target.0.clone());
+        camera.target = render_target.0.clone().into();
     }
 }
 
+fn update_frame_size(
+    recv_frame_size: NonSend<RecvFrameSize>,
+    render_target: Res<AdwaitaRenderTarget>,
+    mut images: ResMut<Assets<Image>>,
+) {
+    // let Some((width, height)) = recv_frame_size.0.try_iter().last() else {
+    //     return;
+    // };
+
+    // let image = images.get_mut(&render_target.0).unwrap();
+    // image.resize(Extent3d {
+    //     width,
+    //     height,
+    //     depth_or_array_layers: 1,
+    // });
+}
+
+// Adwaita-side logic
+
 fn run_adwaita_app(
     application_id: String,
-    send_close_code: oneshot::Sender<i32>,
     recv_frame: flume::Receiver<Frame>,
+    send_frame_size: flume::Sender<(u32, u32)>,
+    send_close_code: oneshot::Sender<i32>,
 ) {
     struct State {
         recv_frame: flume::Receiver<Frame>,
+        send_frame_size: flume::Sender<(u32, u32)>,
         frame: Option<Pixbuf>,
     }
 
+    // TODO Cell?
     let state = Arc::new(Mutex::new(State {
         recv_frame,
+        send_frame_size,
         frame: None,
     }));
 
@@ -138,9 +191,20 @@ fn run_adwaita_app(
             .build();
 
         let state = state.clone();
-        drawing_area.set_draw_func(move |area, cairo, width, height| {
+        drawing_area.set_draw_func(move |_, cairo, width, height| {
             let mut state = state.lock().unwrap();
-            while let Ok(next_frame) = state.recv_frame.try_recv() {
+
+            // tell Bevy what the new render dimensions should be
+            debug_assert!(width > 0);
+            debug_assert!(height > 0);
+            let _ = state
+                .send_frame_size
+                .try_send((width as u32, height as u32));
+
+            // receive the next frame to draw
+            // in case we have multiple frames buffered up,
+            // drop all the intermediary ones and just make a pixbuf from the last one
+            if let Some(next_frame) = state.recv_frame.try_iter().last() {
                 state.frame = Some(pixbuf_from(next_frame));
             }
 
@@ -182,50 +246,11 @@ fn pixbuf_from(frame: Frame) -> Pixbuf {
 
     Pixbuf::from_mut_slice(
         data,
-        Colorspace::Rgb,
-        true, // has_alpha
-        8,    // bits_per_sample
+        Colorspace::Rgb, // this is why we explicitly set the TextureFormat
+        true,            // has_alpha
+        8,               // bits_per_sample
         width as i32,
         height as i32,
         (width * 4) as i32, // row_stride
     )
-}
-
-fn exit_if_adwaita_closed(
-    close_code: NonSend<RecvCloseCode>,
-    mut exit_events: EventWriter<AppExit>,
-) {
-    let exit = match close_code.0.try_recv() {
-        Ok(code) => match NonZero::new(code as u8) {
-            None => AppExit::Success,
-            Some(code) => AppExit::Error(code),
-        },
-        Err(oneshot::TryRecvError::Disconnected) => AppExit::error(),
-        Err(oneshot::TryRecvError::Empty) => return,
-    };
-
-    info!("Window closed, exiting ({exit:?})");
-    exit_events.send(exit);
-}
-
-fn send_frame_to_adwaita(
-    images: Res<RenderAssets<GpuImage>>,
-    render_target: Res<AdwaitaRenderTarget>,
-    send_frame: Res<SendFrame>,
-) {
-    let Some(image) = images.get(&render_target.0) else {
-        info!("no such img");
-        return;
-    };
-
-    debug_assert_eq!(TextureFormat::Rgba8UnormSrgb, image.texture_format);
-    match send_frame.0.try_send(Frame {
-        data: image.data.clone(),
-        width: image.width(),
-    }) {
-        Ok(()) | Err(flume::TrySendError::Full(_)) => {}
-        Err(flume::TrySendError::Disconnected(_)) => {
-            error!("Adwaita frame receiver disconnected");
-        }
-    }
 }
