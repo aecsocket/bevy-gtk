@@ -759,10 +759,14 @@ dependencies = [
  "ash",
  "bevy",
  "flume",
+ "futures-lite",
  "gtk4",
  "libadwaita",
+ "log",
  "oneshot",
+ "thiserror",
  "tracing",
+ "wgpu",
  "wgpu-hal",
 ]
 

@@ -11,13 +11,16 @@ bevy = { version = "0.14.2", default-features = false, features = [
   "bevy_winit",
   "wayland",
 ] }
-wgpu-hal = { version = "0.21.1", features = ["vulkan"] }
-ash = "0.37.3"
-# wgpu = "0.20.1"
 
+ash = "0.37.3"
+wgpu = "0.20.1"
+wgpu-hal = { version = "0.21.1", features = ["vulkan"] }
+futures-lite = "2.3.0"
 tracing = "0.1.40"
 oneshot = "0.1.8"
 flume = "0.11.0"
+thiserror = "1.0.64"
+log = "0.4.22"
 
 [dependencies.adw]
 package = "libadwaita"

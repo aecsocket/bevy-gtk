@@ -8,7 +8,7 @@ use bevy_mod_adwaita::AdwaitaPlugin;
 fn main() -> AppExit {
     App::new()
         .add_plugins((
-            DefaultPlugins,
+            DefaultPlugins.set(AdwaitaPlugin::render_plugin()),
             // DefaultPlugins.set(AdwaitaPlugin::window_plugin()),
             AdwaitaPlugin {
                 application_id: "io.github.aecsocket.bevy_mod_adwaita".into(),
