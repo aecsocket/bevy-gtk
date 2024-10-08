@@ -1,4 +1,4 @@
-mod vk_instance;
+mod vk_custom;
 
 use std::sync::Arc;
 
@@ -11,14 +11,18 @@ use bevy::{
             Extent3d, Texture, TextureDescriptor, TextureDimension, TextureFormat, TextureUsages,
             TextureViewDescriptor,
         },
-        renderer::{RenderDevice, RenderInstance, WgpuWrapper},
+        renderer::{
+            RenderAdapter, RenderAdapterInfo, RenderDevice, RenderInstance, RenderQueue,
+            WgpuWrapper,
+        },
         settings::{RenderCreation, WgpuSettings},
         texture::TextureFormatPixelInfo,
         RenderPlugin,
     },
     window::ExitCondition,
 };
-use wgpu_hal::{vulkan, Instance};
+use wgpu::DeviceDescriptor;
+use wgpu_hal::{vulkan, Instance, OpenDevice};
 
 #[derive(Debug)]
 pub struct AdwaitaPlugin {
@@ -55,60 +59,44 @@ fn create_renderer() -> RenderCreation {
 
     let do_async = async move {
         let instance = unsafe {
-            vk_instance::init(
-                &wgpu_hal::InstanceDescriptor {
-                    name: "bevy_mod_adwaita", // app name
-                    flags: settings.instance_flags,
-                    dx12_shader_compiler: settings.dx12_shader_compiler.clone(),
-                    gles_minor_version: settings.gles3_minor_version,
-                },
-                [
-                    // vk::KhrExternalMemoryCapabilitiesFn::name(),
-                    // vk::KhrDedicatedAllocationFn::name(),
-                    // vk::KhrExternalMemoryFn::name(),
-                ],
-            )
+            vulkan::Instance::init(&wgpu_hal::InstanceDescriptor {
+                name: "bevy_mod_adwaita", // app name
+                flags: settings.instance_flags,
+                dx12_shader_compiler: settings.dx12_shader_compiler.clone(),
+                gles_minor_version: settings.gles3_minor_version,
+            })
         }
         .expect("failed to create vulkan instance");
 
-        for device in unsafe {
-            instance
-                .shared_instance()
-                .raw_instance()
-                .enumerate_physical_devices()
-        }
-        .unwrap()
-        {
-            println!("dev = {device:?}");
-            for e in unsafe {
-                instance
-                    .shared_instance()
-                    .raw_instance()
-                    .enumerate_device_extension_properties(device)
-            }
-            .unwrap()
-            {
-                println!("  ext = {e:?}");
-            }
-        }
+        let adapter = unsafe { instance.enumerate_adapters() }
+            .into_iter()
+            .next()
+            .expect("no adapters");
+        let device = unsafe {
+            vk_custom::open_adapter(
+                &adapter.adapter,
+                settings.features.clone(),
+                [ash::extensions::khr::ExternalMemoryFd::name()],
+            )
+            .expect("failed to open device")
+        };
 
         let instance = unsafe { wgpu::Instance::from_hal::<vulkan::Api>(instance) };
+        let adapter = unsafe { instance.create_adapter_from_hal(adapter) };
+        let adapter_info = adapter.get_info();
+        let device_descriptor =
+            vk_custom::make_device_descriptor(&settings, &adapter, &adapter_info);
+        let (device, queue) =
+            unsafe { adapter.create_device_from_hal(device, &device_descriptor, None) }
+                .expect("failed to create device");
 
-        let request_adapter_options = wgpu::RequestAdapterOptions {
-            power_preference: settings.power_preference,
-            compatible_surface: None,
-            ..default()
-        };
-        let (device, queue, adapter_info, render_adapter) =
-            bevy::render::renderer::initialize_renderer(
-                &instance,
-                &settings,
-                &request_adapter_options,
-            )
-            .await;
-
-        let instance = RenderInstance(Arc::new(WgpuWrapper::new(instance)));
-        RenderCreation::Manual(device, queue, adapter_info, render_adapter, instance)
+        RenderCreation::Manual(
+            RenderDevice::from(device),
+            RenderQueue(Arc::new(WgpuWrapper::new(queue))),
+            RenderAdapterInfo(WgpuWrapper::new(adapter_info)),
+            RenderAdapter(Arc::new(WgpuWrapper::new(adapter))),
+            RenderInstance(Arc::new(WgpuWrapper::new(instance))),
+        )
     };
 
     futures_lite::future::block_on(do_async)
