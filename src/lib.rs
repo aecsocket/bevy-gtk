@@ -1,20 +1,17 @@
-use std::sync::{Arc, Mutex};
-use std::{num::NonZero, thread};
-
-use adw::prelude::*;
-use bevy::asset::RenderAssetUsages;
-use bevy::prelude::*;
-use bevy::render::gpu_readback::{Readback, ReadbackComplete};
-use bevy::render::render_asset::RenderAssets;
-use bevy::render::texture::GpuImage;
-use bevy::render::{
-    camera::RenderTarget,
-    render_resource::{Extent3d, TextureDimension, TextureFormat, TextureUsages},
+use ash::vk::{self, ExternalMemoryHandleTypeFlags};
+use bevy::{
+    prelude::*,
+    render::{
+        camera::{ManualTextureView, ManualTextureViewHandle, ManualTextureViews},
+        render_resource::{
+            Extent3d, Texture, TextureDescriptor, TextureDimension, TextureFormat, TextureUsages,
+            TextureViewDescriptor,
+        },
+        renderer::RenderDevice,
+        texture::TextureFormatPixelInfo,
+    },
 };
-use bevy::window::{ExitCondition, WindowPlugin, WindowRef};
-use gtk::gdk;
-use gtk::gdk_pixbuf::{Colorspace, Pixbuf};
-use tracing::info;
+use wgpu_hal::vulkan;
 
 #[derive(Debug)]
 pub struct AdwaitaPlugin {
@@ -26,7 +23,7 @@ impl AdwaitaPlugin {
     pub const fn window_plugin() -> WindowPlugin {
         WindowPlugin {
             primary_window: None,
-            exit_condition: ExitCondition::DontExit,
+            exit_condition: bevy::window::ExitCondition::DontExit,
             close_when_requested: false,
         }
     }
@@ -34,233 +31,130 @@ impl AdwaitaPlugin {
 
 impl Plugin for AdwaitaPlugin {
     fn build(&self, app: &mut App) {
-        // Bevy -> Adwaita
-        let (send_frame, recv_frame) = flume::bounded::<Frame>(1);
-        // Adwaita -> Bevy
-        let (send_frame_size, recv_frame_size) = flume::bounded::<(u32, u32)>(1);
-        let (send_close_code, recv_close_code) = oneshot::channel::<i32>();
-
-        {
-            let application_id = self.application_id.clone();
-            thread::spawn(move || {
-                run_adwaita_app(application_id, recv_frame, send_frame_size, send_close_code)
-            });
-        }
-
-        app.insert_resource(SendFrame(send_frame))
-            .insert_non_send_resource(RecvCloseCode(recv_close_code))
-            .insert_non_send_resource(RecvFrameSize(recv_frame_size))
-            .add_systems(PreStartup, setup_render_target)
-            .add_systems(PreUpdate, (exit_if_adwaita_closed, update_frame_size))
-            .observe(change_camera_render_target);
+        app.add_systems(PreStartup, setup);
     }
 }
 
-// event loop logic
+pub const MANUAL_TEXTURE_VIEW_HANDLE: ManualTextureViewHandle = ManualTextureViewHandle(3861396404);
 
-#[derive(Debug)]
-struct RecvCloseCode(oneshot::Receiver<i32>);
+const DEFAULT_SIZE: UVec2 = UVec2::new(1280, 720);
 
-fn exit_if_adwaita_closed(
-    close_code: NonSend<RecvCloseCode>,
-    mut exit_events: EventWriter<AppExit>,
-) {
-    let exit = match close_code.0.try_recv() {
-        Ok(code) => match NonZero::new(code as u8) {
-            None => AppExit::Success,
-            Some(code) => AppExit::Error(code),
+const TEXTURE_FORMAT: TextureFormat = TextureFormat::Rgba8UnormSrgb;
+
+fn setup(mut manual_texture_views: ResMut<ManualTextureViews>, render_device: Res<RenderDevice>) {
+    // create the bevy/wgpu texture that we'll be rendering into
+    let texture = render_device.create_texture(&TextureDescriptor {
+        label: Some("adwaita_render_target"),
+        size: Extent3d {
+            width: DEFAULT_SIZE.x,
+            height: DEFAULT_SIZE.y,
+            depth_or_array_layers: 1,
         },
-        Err(oneshot::TryRecvError::Disconnected) => AppExit::error(),
-        Err(oneshot::TryRecvError::Empty) => return,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: TextureDimension::D2,
+        format: TEXTURE_FORMAT,
+        usage: TextureUsages::COPY_SRC
+            | TextureUsages::TEXTURE_BINDING
+            | TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    let texture_view = texture.create_view(&TextureViewDescriptor {
+        label: Some("adwaita_render_target_view"),
+        ..default()
+    });
+    let manual_texture_view = ManualTextureView {
+        texture_view,
+        size: DEFAULT_SIZE,
+        format: TEXTURE_FORMAT,
     };
 
-    info!("Window closed, exiting ({exit:?})");
-    exit_events.send(exit);
+    // cameras will render into `RenderTarget::Manual(MANUAL_TEXTURE_VIEW_HANDLE)`
+    // to draw into the Adwaita buffer
+    let replaced = manual_texture_views.insert(MANUAL_TEXTURE_VIEW_HANDLE, manual_texture_view);
+    assert!(replaced.is_none());
+
+    // export this texture as a dmabuf
+    let texture_fd = unsafe {
+        render_device
+            .wgpu_device()
+            .as_hal::<vulkan::Api, _, _>(|device| {
+                let device = device.expect("`RenderDevice` should be a vulkan device");
+                export_texture_memory(device, &texture)
+            })
+    }
+    .unwrap();
+
+    info!("fd = {texture_fd}");
 }
 
-// sending frames
+fn export_texture_memory(device: &vulkan::Device, texture: &Texture) -> i32 {
+    // get the raw Vulkan Image for this texture
+    let image = unsafe {
+        texture
+            .as_hal::<vulkan::Api, _, _>(|texture| texture.map(|texture| texture.raw_handle()))
+            .expect("`texture` should be a vulkan `Image`")
+    };
 
-#[derive(Debug, Clone, Deref, Resource)]
-pub struct AdwaitaRenderTarget(pub Handle<Image>);
+    // allocate the actual memory object that we'll be exporting as dmabuf
+    // compute some properties for the allocation first
+    let alloc_size = texture.size().width as usize
+        * texture.size().height as usize
+        * texture.format().pixel_size();
+    let memory_properties = unsafe {
+        device
+            .shared_instance()
+            .raw_instance()
+            .get_physical_device_memory_properties(device.raw_physical_device())
+    };
 
-#[derive(Debug)]
-struct RecvFrameSize(flume::Receiver<(u32, u32)>);
+    let memory_type_index = memory_properties
+        .memory_types
+        .iter()
+        .take(memory_properties.memory_type_count as usize)
+        .position(|memory_type| {
+            // TODO external memory?
+            memory_type
+                .property_flags
+                .contains(vk::MemoryPropertyFlags::DEVICE_LOCAL)
+        })
+        .expect("failed to find memory type index for exporting memory");
 
-#[derive(Debug, Resource)]
-struct SendFrame(flume::Sender<Frame>);
-
-#[derive(Debug)]
-struct Frame {
-    data: Vec<u8>,
-    width: u32,
-}
-
-fn setup_render_target(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
-    let size = Extent3d {
-        width: 512,
-        height: 512,
+    let export_info = vk::ExportMemoryAllocateInfo {
+        handle_types: vk::ExternalMemoryHandleTypeFlagsKHR::OPAQUE_FD,
         ..default()
     };
 
-    let mut render_image = Image::new_fill(
-        size,
-        TextureDimension::D2,
-        &[0; 4],
-        // Cairo expects RGBA
-        TextureFormat::Rgba8UnormSrgb,
-        RenderAssetUsages::RENDER_WORLD,
+    let memory_alloc_info = vk::MemoryAllocateInfo {
+        p_next: &export_info as *const _ as *const std::ffi::c_void,
+        allocation_size: alloc_size as u64,
+        memory_type_index: memory_type_index as u32,
+        ..default()
+    };
+
+    let memory = unsafe {
+        device
+            .raw_device()
+            .allocate_memory(&memory_alloc_info, None)
+    }
+    .expect("failed to allocate memory");
+
+    // bind the render image to this allocated memory
+    unsafe { device.raw_device().bind_image_memory(image, memory, 0) }
+        .expect("failed to bind memory to image");
+
+    // read the fd of this memory object
+    let external_memory_fd_ext = ash::extensions::khr::ExternalMemoryFd::new(
+        device.shared_instance().raw_instance(),
+        device.raw_device(),
     );
-    render_image.texture_descriptor.usage |=
-        TextureUsages::COPY_SRC | TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING;
-    let render_image = images.add(render_image);
-
-    commands
-        .spawn(Readback::texture(render_image.clone()))
-        .observe(|trigger: Trigger<ReadbackComplete>| {
-            info!("got readback");
-            // let data = trigger.event().0.clone();
-            // send_frame.0.try_send(Frame { data, width: 512 });
-        });
-    info!("spawned readback");
-
-    commands.insert_resource(AdwaitaRenderTarget(render_image));
-}
-
-fn change_camera_render_target(
-    trigger: Trigger<OnInsert, Camera>,
-    mut cameras: Query<&mut Camera>,
-    render_target: Res<AdwaitaRenderTarget>,
-) {
-    let entity = trigger.entity();
-    let mut camera = cameras
-        .get_mut(entity)
-        .expect("should exist because we are inserting this component onto this entity");
-
-    if matches!(camera.target, RenderTarget::Window(WindowRef::Primary)) {
-        camera.target = render_target.0.clone().into();
+    let external_memory_fd = unsafe {
+        external_memory_fd_ext.get_memory_fd(&vk::MemoryGetFdInfoKHR {
+            memory,
+            ..default()
+        })
     }
-}
+    .expect("failed to get fd for memory");
 
-fn update_frame_size(
-    recv_frame_size: NonSend<RecvFrameSize>,
-    render_target: Res<AdwaitaRenderTarget>,
-    mut images: ResMut<Assets<Image>>,
-) {
-    // let Some((width, height)) = recv_frame_size.0.try_iter().last() else {
-    //     return;
-    // };
-
-    // let image = images.get_mut(&render_target.0).unwrap();
-    // image.resize(Extent3d {
-    //     width,
-    //     height,
-    //     depth_or_array_layers: 1,
-    // });
-}
-
-// Adwaita-side logic
-
-fn run_adwaita_app(
-    application_id: String,
-    recv_frame: flume::Receiver<Frame>,
-    send_frame_size: flume::Sender<(u32, u32)>,
-    send_close_code: oneshot::Sender<i32>,
-) {
-    struct State {
-        recv_frame: flume::Receiver<Frame>,
-        send_frame_size: flume::Sender<(u32, u32)>,
-        frame: Option<Pixbuf>,
-    }
-
-    // TODO Cell?
-    let state = Arc::new(Mutex::new(State {
-        recv_frame,
-        send_frame_size,
-        frame: None,
-    }));
-
-    let app = adw::Application::builder()
-        .application_id(application_id)
-        .build();
-
-    let state = state.clone();
-    app.connect_activate(move |app| {
-        let header_bar = adw::HeaderBar::new();
-
-        let dmabuf_builder = gdk::DmabufTextureBuilder::new();
-        dmabuf_builder.set_width(512);
-        dmabuf_builder.set_height(512);
-
-        let graphics_offload = gtk::GraphicsOffload::builder()
-            .black_background(true)
-            .build();
-
-        // let drawing_area = gtk::DrawingArea::builder()
-        //     .hexpand(true)
-        //     .vexpand(true)
-        //     .build();
-
-        // let state = state.clone();
-        // drawing_area.set_draw_func(move |_, cairo, width, height| {
-        //     let mut state = state.lock().unwrap();
-
-        //     // tell Bevy what the new render dimensions should be
-        //     debug_assert!(width > 0);
-        //     debug_assert!(height > 0);
-        //     let _ = state
-        //         .send_frame_size
-        //         .try_send((width as u32, height as u32));
-
-        //     // receive the next frame to draw
-        //     // in case we have multiple frames buffered up,
-        //     // drop all the intermediary ones and just make a pixbuf from the last one
-        //     if let Some(next_frame) = state.recv_frame.try_iter().last() {
-        //         state.frame = Some(pixbuf_from(next_frame));
-        //     }
-
-        //     if let Some(frame) = state.frame.as_ref() {
-        //         cairo.set_source_pixbuf(frame, 0.0, 0.0);
-        //         cairo.paint().unwrap();
-
-        //         cairo.set_source_rgb(1.0, 0.0, 0.0);
-        //         cairo.rectangle(16.0, 16.0, 64.0, 64.0);
-        //         cairo.fill().unwrap();
-
-        //         info!("mom look i rendered {} x {}", frame.width(), frame.height());
-        //     }
-        // });
-
-        let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        content.append(&header_bar);
-        content.append(&graphics_offload);
-
-        let window = adw::ApplicationWindow::builder()
-            .application(app)
-            .title("Whatever app TODO")
-            .content(&content)
-            .build();
-        window.present();
-    });
-
-    let close_code = app.run().value();
-    let _ = send_close_code.send(close_code);
-}
-
-fn pixbuf_from(frame: Frame) -> Pixbuf {
-    let Frame { data, width } = frame;
-
-    debug_assert!(data.len() % 4 == 0);
-    let pixels = (data.len() / 4) as u32;
-    debug_assert!(pixels % width == 0);
-    let height = pixels / width;
-
-    Pixbuf::from_mut_slice(
-        data,
-        Colorspace::Rgb, // this is why we explicitly set the TextureFormat
-        true,            // has_alpha
-        8,               // bits_per_sample
-        width as i32,
-        height as i32,
-        (width * 4) as i32, // row_stride
-    )
+    external_memory_fd
 }
