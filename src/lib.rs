@@ -31,7 +31,7 @@ pub struct AdwaitaPlugin {
 
 impl Plugin for AdwaitaPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(PreStartup, setup);
+        // app.add_systems(PreStartup, setup);
     }
 }
 
@@ -68,33 +68,51 @@ fn create_renderer() -> RenderCreation {
         }
         .expect("failed to create vulkan instance");
 
-        let adapter = unsafe { instance.enumerate_adapters() }
-            .into_iter()
-            .next()
-            .expect("no adapters");
-        let device = unsafe {
-            vk_custom::open_adapter(
-                &adapter.adapter,
-                settings.features.clone(),
-                [ash::extensions::khr::ExternalMemoryFd::name()],
-            )
-            .expect("failed to open device")
-        };
-
+        // validation works
         let instance = unsafe { wgpu::Instance::from_hal::<vulkan::Api>(instance) };
-        let adapter = unsafe { instance.create_adapter_from_hal(adapter) };
-        let adapter_info = adapter.get_info();
-        let device_descriptor =
-            vk_custom::make_device_descriptor(&settings, &adapter, &adapter_info);
-        let (device, queue) =
-            unsafe { adapter.create_device_from_hal(device, &device_descriptor, None) }
-                .expect("failed to create device");
+        let (device, queue, adapter_info, adapter) = bevy::render::renderer::initialize_renderer(
+            &instance,
+            &settings,
+            &wgpu::RequestAdapterOptions {
+                power_preference: settings.power_preference,
+                compatible_surface: None,
+                ..default()
+            },
+        )
+        .await;
+
+        // validation fails
+        // let adapter = unsafe { instance.enumerate_adapters() }
+        //     .into_iter()
+        //     .next()
+        //     .expect("no adapters");
+        // let device = unsafe {
+        //     vk_custom::open_adapter(
+        //         &adapter.adapter,
+        //         settings.features.clone(),
+        //         [],
+        //         // [ash::extensions::khr::ExternalMemoryFd::name()],
+        //     )
+        //     .expect("failed to open device")
+        // };
+        // let instance = unsafe { wgpu::Instance::from_hal::<vulkan::Api>(instance) };
+        // let adapter = unsafe { instance.create_adapter_from_hal(adapter) };
+        // let adapter_info = adapter.get_info();
+        // let device_descriptor =
+        //     vk_custom::make_device_descriptor(&settings, &adapter, &adapter_info);
+        // let (device, queue) =
+        //     unsafe { adapter.create_device_from_hal(device, &device_descriptor, None) }
+        //         .expect("failed to create device");
+        // let device = RenderDevice::from(device),
+        // let queue = RenderQueue(Arc::new(WgpuWrapper::new(queue))),
+        // let adapter_info = RenderAdapterInfo(WgpuWrapper::new(adapter_info)),
+        // let adapter = RenderAdapter(Arc::new(WgpuWrapper::new(adapter))),
 
         RenderCreation::Manual(
-            RenderDevice::from(device),
-            RenderQueue(Arc::new(WgpuWrapper::new(queue))),
-            RenderAdapterInfo(WgpuWrapper::new(adapter_info)),
-            RenderAdapter(Arc::new(WgpuWrapper::new(adapter))),
+            device,
+            queue,
+            adapter_info,
+            adapter,
             RenderInstance(Arc::new(WgpuWrapper::new(instance))),
         )
     };
