@@ -59,8 +59,6 @@ pub struct AdwaitaWindow {
 #[reflect(Component)]
 pub struct PrimaryAdwaitaWindow;
 
-const DEFAULT_SIZE: UVec2 = UVec2::new(512, 512);
-
 impl AdwaitaWindow {
     #[must_use]
     pub fn open(app_id: impl Into<String>) -> impl EntityCommand {
@@ -70,8 +68,8 @@ impl AdwaitaWindow {
                 entity,
                 world,
                 application_id,
-                NonZero::new(1280).unwrap(),
-                NonZero::new(720).unwrap(),
+                NonZero::new(512).unwrap(),
+                NonZero::new(512).unwrap(),
             )
         }
     }
@@ -85,18 +83,6 @@ impl AdwaitaWindow {
     pub const fn render_target(&self) -> RenderTarget {
         RenderTarget::TextureView(self.render_target_view_handle)
     }
-}
-
-/// Info that that the Adwaita window requires to be able to make a
-/// `GraphicsOffload` for rendering the Bevy app contents.
-#[derive(Debug, Clone, Copy)]
-struct DmabufInfo {
-    /// Width of the buffer.
-    width: NonZero<u32>,
-    /// Height of the buffer.
-    height: NonZero<u32>,
-    /// File descriptor of the buffer.
-    fd: i32,
 }
 
 // Spawns a thread to run the Adwaita window event loop, and creates a texture
@@ -151,6 +137,18 @@ fn open(
     });
 }
 
+/// Info that that the Adwaita window requires to be able to make a
+/// `GraphicsOffload` for rendering the Bevy app contents.
+#[derive(Debug, Clone, Copy)]
+struct DmabufInfo {
+    /// Width of the buffer.
+    width: NonZero<u32>,
+    /// Height of the buffer.
+    height: NonZero<u32>,
+    /// File descriptor of the buffer.
+    fd: i32,
+}
+
 fn run(
     app_id: String,
     recv_dmabuf_info: flume::Receiver<DmabufInfo>,
@@ -164,12 +162,10 @@ fn run(
     app.connect_activate(move |app| {
         let header_bar = adw::HeaderBar::new();
 
-        let picture = gtk::Picture::new();
         let graphics_offload = gtk::GraphicsOffload::builder()
             .black_background(true)
             .hexpand(true)
             .vexpand(true)
-            .child(&picture)
             .build();
 
         let frame = {
@@ -201,11 +197,16 @@ fn run(
 
             let frame_content_h = gtk::Box::new(gtk::Orientation::Horizontal, 0);
             frame_content_h.append(&height_listener);
-            frame_content_h.append(&graphics_offload);
+            frame_content_h.append(&graphics_offload); // todo
 
             let frame_content_v = gtk::Box::new(gtk::Orientation::Vertical, 0);
             frame_content_v.append(&width_listener);
             frame_content_v.append(&frame_content_h);
+
+            frame_content_v.set_margin_start(10);
+            frame_content_v.set_margin_end(10);
+            frame_content_v.set_margin_top(10);
+            frame_content_v.set_margin_bottom(10);
 
             frame_content_v
         };
@@ -226,18 +227,13 @@ fn run(
 
         let recv_dmabuf_info = recv_dmabuf_info.clone();
         glib::idle_add_local(move || {
-            let dmabuf_info = match recv_dmabuf_info.try_recv() {
-                Ok(info) => info,
-                Err(flume::TryRecvError::Empty) => {
-                    return glib::ControlFlow::Continue;
-                }
-                Err(flume::TryRecvError::Disconnected) => {
-                    return glib::ControlFlow::Break;
-                }
+            let Ok(dmabuf_info) = recv_dmabuf_info.try_recv() else {
+                return glib::ControlFlow::Continue;
             };
 
             let texture = render::build_dmabuf_texture(dmabuf_info);
-            picture.set_paintable(Some(&texture));
+            let picture = gtk::Picture::builder().paintable(&texture).build();
+            graphics_offload.set_child(Some(&picture));
 
             glib::ControlFlow::Continue
         });

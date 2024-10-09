@@ -137,7 +137,7 @@ pub fn setup_render_target(
 
     let (width, height) = (width.get(), height.get());
     let wgpu_device = render_device.wgpu_device();
-    let (texture, fd) = unsafe {
+    let (texture, dmabuf_fd) = unsafe {
         let r = wgpu_device.as_hal::<vulkan::Api, _, _>(|hal_device| {
             let hal_device = hal_device.expect("`RenderDevice` is not a vulkan device");
             let vk_device = hal_device.raw_device();
@@ -269,7 +269,7 @@ pub fn setup_render_target(
         format: wgpu::TextureFormat::Rgba8UnormSrgb,
     };
 
-    (manual_texture_view, fd)
+    (manual_texture_view, dmabuf_fd)
 }
 
 pub fn build_dmabuf_texture(info: DmabufInfo) -> gdk::Texture {
@@ -289,5 +289,5 @@ pub fn build_dmabuf_texture(info: DmabufInfo) -> gdk::Texture {
     builder.set_offset(0, 0);
     builder.set_stride(0, width * 4); // bytes per row
 
-    unsafe { builder.build() }.expect("failed to build dmabuf texture")
+    unsafe { builder.build() }.expect("should be a valid dmabuf texture")
 }
