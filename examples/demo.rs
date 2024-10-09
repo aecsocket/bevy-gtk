@@ -1,4 +1,8 @@
-use bevy::prelude::*;
+use bevy::{
+    prelude::*,
+    render::camera::RenderTarget,
+    window::{PrimaryWindow, WindowRef},
+};
 use bevy_mod_adwaita::{AdwaitaPlugin, AdwaitaWindow, PrimaryAdwaitaWindow};
 
 fn main() -> AppExit {
@@ -28,6 +32,7 @@ fn setup_scene(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    primary_window: Query<Entity, With<PrimaryWindow>>,
 ) {
     // circular base
     commands.spawn(PbrBundle {
@@ -57,6 +62,14 @@ fn setup_scene(
     });
     // camera
     commands.spawn(Camera3dBundle {
+        transform: Transform::from_xyz(-2.5, 4.5, 9.0).looking_at(Vec3::ZERO, Vec3::Y),
+        ..default()
+    });
+    commands.spawn(Camera3dBundle {
+        camera: Camera {
+            target: RenderTarget::Window(WindowRef::Entity(primary_window.single())),
+            ..default()
+        },
         transform: Transform::from_xyz(-2.5, 4.5, 9.0).looking_at(Vec3::ZERO, Vec3::Y),
         ..default()
     });

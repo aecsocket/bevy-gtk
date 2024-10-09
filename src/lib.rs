@@ -19,6 +19,7 @@ use bevy::{
         camera::{ManualTextureViewHandle, ManualTextureViews, RenderTarget},
         render_resource::TextureView,
         renderer::RenderDevice,
+        Extract, MainWorld, Render, RenderApp, RenderSet,
     },
     window::WindowRef,
 };
@@ -44,6 +45,10 @@ impl Plugin for AdwaitaPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(PreUpdate, update_frame_size)
             .observe(change_default_render_target);
+        let render_app = app.sub_app_mut(RenderApp);
+        render_app
+            .add_systems(ExtractSchedule, extract_windows)
+            .add_systems(Render, update_dmabufs.after(RenderSet::Render));
     }
 }
 
@@ -52,11 +57,11 @@ pub struct AdwaitaWindow {
     recv_close_code: SyncWrapper<oneshot::Receiver<i32>>,
     render_target_view_handle: ManualTextureViewHandle,
     send_old_texture_view: flume::Sender<TextureView>,
-    dmabuf_info: Arc<AtomicOptionBox<DmabufInfo>>,
+    shared_dmabuf_info: Arc<AtomicOptionBox<DmabufInfo>>,
     frame_width: Arc<AtomicI32>,
     frame_height: Arc<AtomicI32>,
     last_frame_size: Option<(NonZero<u32>, NonZero<u32>)>,
-    dmabuf_info_to_send: Option<DmabufInfo>,
+    dmabuf_info_to_send: AtomicOptionBox<DmabufInfo>,
 }
 
 #[derive(Debug, Clone, Copy, Component, Reflect)]
@@ -72,8 +77,8 @@ impl AdwaitaWindow {
                 entity,
                 world,
                 application_id,
-                NonZero::new(512).unwrap(),
-                NonZero::new(512).unwrap(),
+                NonZero::new(1280).unwrap(),
+                NonZero::new(720).unwrap(),
             )
         }
     }
@@ -138,11 +143,11 @@ fn open(
         recv_close_code: SyncWrapper::new(recv_close_code),
         render_target_view_handle: view_handle,
         send_old_texture_view,
-        dmabuf_info,
+        shared_dmabuf_info: dmabuf_info,
         frame_width,
         frame_height,
         last_frame_size: None,
-        dmabuf_info_to_send: None,
+        dmabuf_info_to_send: AtomicOptionBox::none(),
     });
 }
 
@@ -231,10 +236,10 @@ fn run(
             frame_content_v.append(&width_listener);
             frame_content_v.append(&frame_content_h);
 
-            frame_content_v.set_margin_start(10);
-            frame_content_v.set_margin_end(10);
-            frame_content_v.set_margin_top(10);
-            frame_content_v.set_margin_bottom(10);
+            // frame_content_v.set_margin_start(10);
+            // frame_content_v.set_margin_end(10);
+            // frame_content_v.set_margin_top(10);
+            // frame_content_v.set_margin_bottom(10);
 
             frame_content_v
         };
@@ -275,13 +280,6 @@ fn update_frame_size(
         let span = trace_span!("update", window = %entity);
         let _span = span.enter();
 
-        // See below.
-        if let Some(dmabuf_info) = window.dmabuf_info_to_send.take() {
-            window
-                .dmabuf_info
-                .store(Some(Box::new(dmabuf_info)), Ordering::SeqCst);
-        }
-
         let (width, height) = (
             window.frame_width.load(Ordering::SeqCst),
             window.frame_height.load(Ordering::SeqCst),
@@ -299,7 +297,7 @@ fn update_frame_size(
             continue;
         }
         window.last_frame_size = Some((width, height));
-        trace!("Updating render target size to {width}x{height}");
+        info!("Updating render target size to {width}x{height}");
 
         let (new_texture_view, dmabuf_fd) =
             render::setup_render_target(width, height, render_device.as_ref());
@@ -321,14 +319,8 @@ fn update_frame_size(
         // However, we don't want to give this new dmabuf over to the window
         // yet, because we've literally just made it. It'll have some garbage
         // memory, and we don't want the window to try reading that.
-        // Instead, we wait until the render app has done one full render (until
-        // the new texture view has actual content in it), and only then send
-        // over the new dmabuf info.
-        //
-        // Currently, we send this dmabuf info on the next update, when
-        // we're guaranteed that we've drawn a frame (see the top of this fn).
-        // But in theory, we can do this immediately after `RenderSet::Render`
-        // in the render world, which would reduce latency.
+        // Instead, we wait until the render app has done one full render, and
+        // only then send over the new dmabuf info.
         let dmabuf_info = DmabufInfo {
             width,
             height,
@@ -337,7 +329,40 @@ fn update_frame_size(
         // If the old value is dropped, it's OK - the associated texture view
         // will just be buffered up in the channel, and dropped the next time
         // the window swaps its target.
-        window.dmabuf_info_to_send = Some(dmabuf_info);
+        window
+            .dmabuf_info_to_send
+            .store(Some(Box::new(dmabuf_info)), Ordering::SeqCst);
+    }
+}
+
+#[derive(Debug, Component)]
+struct RenderWindow {
+    shared_dmabuf_info: Arc<AtomicOptionBox<DmabufInfo>>,
+    dmabuf_info_to_send: Option<Box<DmabufInfo>>,
+}
+
+fn extract_windows(mut commands: Commands, windows: Extract<Query<&AdwaitaWindow>>) {
+    for window in &windows {
+        let Some(dmabuf_info_to_send) = window.dmabuf_info_to_send.take(Ordering::SeqCst) else {
+            continue;
+        };
+
+        commands.spawn(RenderWindow {
+            shared_dmabuf_info: window.shared_dmabuf_info.clone(),
+            dmabuf_info_to_send: Some(dmabuf_info_to_send),
+        });
+    }
+}
+
+fn update_dmabufs(mut windows: Query<&mut RenderWindow>) {
+    for mut window in &mut windows {
+        let Some(dmabuf_info) = window.dmabuf_info_to_send.take() else {
+            continue;
+        };
+
+        window
+            .shared_dmabuf_info
+            .store(Some(dmabuf_info), Ordering::SeqCst);
     }
 }
 

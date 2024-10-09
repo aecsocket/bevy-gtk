@@ -109,7 +109,7 @@ const DMABUF_MODIFIER: u64 = 0; // DRM_FORMAT_MOD_LINEAR
 
 // https://github.com/torvalds/linux/blob/master/include/uapi/drm/drm_fourcc.h
 // Why isn't this RGBA8? I don't know! But this works!
-const DMABUF_FORMAT: u32 = u32::from_le_bytes(*b"AB24"); // wrong // ABGR8888
+const DMABUF_FORMAT: u32 = u32::from_le_bytes(*b"AB24"); // ABGR8888
 const VK_FORMAT: vk::Format = vk::Format::R8G8B8A8_SRGB;
 const TEXTURE_FORMAT: TextureFormat = TextureFormat::Rgba8UnormSrgb;
 
@@ -118,6 +118,33 @@ pub fn setup_render_target(
     height: NonZero<u32>,
     render_device: &RenderDevice,
 ) -> (ManualTextureView, i32) {
+    let (width, height) = (width.get(), height.get());
+    let wgpu_device = render_device.wgpu_device();
+    let (texture, dmabuf_fd) = unsafe {
+        let r = wgpu_device.as_hal::<vulkan::Api, _, _>(|hal_device| {
+            let hal_device = hal_device.expect("`RenderDevice` is not a vulkan device");
+            create_target_from_hal(wgpu_device, hal_device, width, height)
+        });
+        r.unwrap()
+    };
+
+    let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+    let manual_texture_view = ManualTextureView {
+        texture_view: texture_view.into(),
+        size: UVec2::new(width, height),
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+    };
+
+    (manual_texture_view, dmabuf_fd)
+}
+
+fn create_target_from_hal(
+    wgpu_device: &wgpu::Device,
+    hal_device: &vulkan::Device,
+    width: u32,
+    height: u32,
+) -> (wgpu::Texture, i32) {
     struct DropGuard {
         device: ash::Device,
         memory: vk::DeviceMemory,
@@ -137,82 +164,105 @@ pub fn setup_render_target(
         }
     }
 
-    let (width, height) = (width.get(), height.get());
-    let wgpu_device = render_device.wgpu_device();
-    let (texture, dmabuf_fd) = unsafe {
-        let r = wgpu_device.as_hal::<vulkan::Api, _, _>(|hal_device| {
-            let hal_device = hal_device.expect("`RenderDevice` is not a vulkan device");
-            let vk_device = hal_device.raw_device();
-            let instance = hal_device.shared_instance().raw_instance();
+    let vk_device = hal_device.raw_device();
+    let instance = hal_device.shared_instance().raw_instance();
 
-            let external_memory_image_create = vk::ExternalMemoryImageCreateInfo {
-                handle_types: vk::ExternalMemoryHandleTypeFlags::OPAQUE_FD,
-                ..default()
-            };
-            let image_create = vk::ImageCreateInfo {
-                p_next: &external_memory_image_create as *const _ as *const c_void,
-                image_type: vk::ImageType::TYPE_2D,
-                format: VK_FORMAT,
-                extent: vk::Extent3D {
-                    width,
-                    height,
-                    depth: 1,
-                },
-                mip_levels: 1,
-                array_layers: 1,
-                samples: vk::SampleCountFlags::TYPE_1,
-                tiling: vk::ImageTiling::LINEAR, // or OPTIMAL?
-                usage: vk::ImageUsageFlags::TRANSFER_SRC | vk::ImageUsageFlags::COLOR_ATTACHMENT,
-                sharing_mode: vk::SharingMode::EXCLUSIVE,
-                initial_layout: vk::ImageLayout::UNDEFINED,
-                ..default()
-            };
-            let image = unsafe { vk_device.create_image(&image_create, None) }
-                .expect("failed to create image");
+    let external_memory_image_create = vk::ExternalMemoryImageCreateInfo {
+        handle_types: vk::ExternalMemoryHandleTypeFlags::OPAQUE_FD,
+        ..default()
+    };
+    let image_create = vk::ImageCreateInfo {
+        p_next: &external_memory_image_create as *const _ as *const c_void,
+        image_type: vk::ImageType::TYPE_2D,
+        format: VK_FORMAT,
+        extent: vk::Extent3D {
+            width,
+            height,
+            depth: 1,
+        },
+        mip_levels: 1,
+        array_layers: 1,
+        samples: vk::SampleCountFlags::TYPE_1,
+        tiling: vk::ImageTiling::LINEAR, // or OPTIMAL?
+        usage: vk::ImageUsageFlags::TRANSFER_SRC | vk::ImageUsageFlags::COLOR_ATTACHMENT,
+        sharing_mode: vk::SharingMode::EXCLUSIVE,
+        initial_layout: vk::ImageLayout::UNDEFINED,
+        ..default()
+    };
+    let image =
+        unsafe { vk_device.create_image(&image_create, None) }.expect("failed to create image");
 
-            let mut memory_requirements = vk::MemoryRequirements2KHR::default();
-            unsafe {
-                ash::extensions::khr::GetMemoryRequirements2::new(instance, vk_device)
-                    .get_image_memory_requirements2(
-                        &vk::ImageMemoryRequirementsInfo2 { image, ..default() },
-                        &mut memory_requirements,
-                    );
-            }
+    let mut memory_requirements = vk::MemoryRequirements2KHR::default();
+    unsafe {
+        ash::extensions::khr::GetMemoryRequirements2::new(instance, vk_device)
+            .get_image_memory_requirements2(
+                &vk::ImageMemoryRequirementsInfo2 { image, ..default() },
+                &mut memory_requirements,
+            );
+    }
 
-            let dedicated_alloc_info = vk::MemoryDedicatedAllocateInfo { image, ..default() };
-            let export_info = vk::ExportMemoryAllocateInfo {
-                p_next: &dedicated_alloc_info as *const _ as *const c_void,
-                handle_types: vk::ExternalMemoryHandleTypeFlags::OPAQUE_FD,
-                ..default()
-            };
-            let alloc_info = vk::MemoryAllocateInfo {
-                p_next: &export_info as *const _ as *const c_void,
-                allocation_size: memory_requirements.memory_requirements.size,
-                ..default()
-            };
-            let memory = unsafe { vk_device.allocate_memory(&alloc_info, None) }
-                .expect("failed to allocate memory");
+    let dedicated_alloc_info = vk::MemoryDedicatedAllocateInfo { image, ..default() };
+    let export_info = vk::ExportMemoryAllocateInfo {
+        p_next: &dedicated_alloc_info as *const _ as *const c_void,
+        handle_types: vk::ExternalMemoryHandleTypeFlags::OPAQUE_FD,
+        ..default()
+    };
+    let alloc_info = vk::MemoryAllocateInfo {
+        p_next: &export_info as *const _ as *const c_void,
+        allocation_size: memory_requirements.memory_requirements.size,
+        ..default()
+    };
+    let memory =
+        unsafe { vk_device.allocate_memory(&alloc_info, None) }.expect("failed to allocate memory");
 
-            let bind_image_memory = vk::BindImageMemoryInfo {
-                image,
-                memory,
-                ..default()
-            };
-            unsafe { vk_device.bind_image_memory2(&[bind_image_memory]) }
-                .expect("failed to bind memory to image");
+    let bind_image_memory = vk::BindImageMemoryInfo {
+        image,
+        memory,
+        ..default()
+    };
+    unsafe { vk_device.bind_image_memory2(&[bind_image_memory]) }
+        .expect("failed to bind memory to image");
 
-            let get_memory_info = vk::MemoryGetFdInfoKHR {
-                memory,
-                handle_type: vk::ExternalMemoryHandleTypeFlags::OPAQUE_FD,
-                ..default()
-            };
-            let dmabuf_fd = unsafe {
-                ash::extensions::khr::ExternalMemoryFd::new(instance, vk_device)
-                    .get_memory_fd(&get_memory_info)
-            }
-            .expect("failed to get fd for allocated memory");
+    let get_memory_info = vk::MemoryGetFdInfoKHR {
+        memory,
+        handle_type: vk::ExternalMemoryHandleTypeFlags::OPAQUE_FD,
+        ..default()
+    };
+    let dmabuf_fd = unsafe {
+        ash::extensions::khr::ExternalMemoryFd::new(instance, vk_device)
+            .get_memory_fd(&get_memory_info)
+    }
+    .expect("failed to get fd for allocated memory");
 
-            let texture_desc = wgpu_hal::TextureDescriptor {
+    let texture_desc = wgpu_hal::TextureDescriptor {
+        label: Some("adwaita_render_target"),
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: TEXTURE_FORMAT,
+        usage: wgpu_hal::TextureUses::COPY_SRC | wgpu_hal::TextureUses::COLOR_TARGET,
+        memory_flags: wgpu_hal::MemoryFlags::empty(),
+        view_formats: Vec::new(),
+    };
+
+    let drop_guard = Box::new(DropGuard {
+        device: hal_device.raw_device().clone(),
+        memory,
+        image,
+        dmabuf_fd,
+    });
+    let texture =
+        unsafe { vulkan::Device::texture_from_raw(image, &texture_desc, Some(drop_guard)) };
+
+    let texture = unsafe {
+        wgpu_device.create_texture_from_hal::<vulkan::Api>(
+            texture,
+            &wgpu::TextureDescriptor {
                 label: Some("adwaita_render_target"),
                 size: wgpu::Extent3d {
                     width,
@@ -223,55 +273,13 @@ pub fn setup_render_target(
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
                 format: TEXTURE_FORMAT,
-                usage: wgpu_hal::TextureUses::COPY_SRC | wgpu_hal::TextureUses::COLOR_TARGET,
-                memory_flags: wgpu_hal::MemoryFlags::empty(),
-                view_formats: Vec::new(),
-            };
-
-            let drop_guard = Box::new(DropGuard {
-                device: hal_device.raw_device().clone(),
-                memory,
-                image,
-                dmabuf_fd,
-            });
-            let texture =
-                unsafe { vulkan::Device::texture_from_raw(image, &texture_desc, Some(drop_guard)) };
-
-            let texture = unsafe {
-                wgpu_device.create_texture_from_hal::<vulkan::Api>(
-                    texture,
-                    &wgpu::TextureDescriptor {
-                        label: Some("adwaita_render_target"),
-                        size: wgpu::Extent3d {
-                            width,
-                            height,
-                            depth_or_array_layers: 1,
-                        },
-                        mip_level_count: 1,
-                        sample_count: 1,
-                        dimension: wgpu::TextureDimension::D2,
-                        format: TEXTURE_FORMAT,
-                        usage: wgpu::TextureUsages::COPY_SRC
-                            | wgpu::TextureUsages::RENDER_ATTACHMENT,
-                        view_formats: &[],
-                    },
-                )
-            };
-
-            (texture, dmabuf_fd)
-        });
-        r.unwrap()
+                usage: wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            },
+        )
     };
 
-    let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-
-    let manual_texture_view = ManualTextureView {
-        texture_view: texture_view.into(),
-        size: UVec2::new(width, height),
-        format: wgpu::TextureFormat::Rgba8UnormSrgb,
-    };
-
-    (manual_texture_view, dmabuf_fd)
+    (texture, dmabuf_fd)
 }
 
 pub fn build_dmabuf_texture(info: DmabufInfo) -> gdk::Texture {
