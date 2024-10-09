@@ -1,7 +1,7 @@
 mod hal_custom;
 mod render;
 
-use std::{thread, time::Duration};
+use std::{sync::Arc, thread, time::Duration};
 
 use adw::prelude::*;
 use bevy::{
@@ -33,13 +33,15 @@ impl AdwaitaPlugin {
 
 impl Plugin for AdwaitaPlugin {
     fn build(&self, app: &mut App) {
-        app.observe(change_default_render_target);
+        app.add_systems(PreUpdate, update_windows)
+            .observe(change_default_render_target);
     }
 }
 
 #[derive(Debug, Component)]
 pub struct AdwaitaWindow {
     render_target_view_handle: ManualTextureViewHandle,
+    recv_size: flume::Receiver<(i32, i32)>,
     recv_close_code: SyncWrapper<oneshot::Receiver<i32>>,
 }
 
@@ -68,32 +70,27 @@ impl AdwaitaWindow {
 }
 
 fn open(entity: Entity, world: &mut World, app_id: String) {
+    let manual_texture_views = world.resource::<ManualTextureViews>();
+    let render_device = world.resource::<RenderDevice>();
+
+    let view_handle = loop {
+        let view_handle = ManualTextureViewHandle(rand::random());
+        if !manual_texture_views.contains_key(&view_handle) {
+            break view_handle;
+        }
+    };
+    let (view, dmabuf_fd) = render::setup_render_target(DEFAULT_SIZE, render_device);
+
+    world
+        .resource_mut::<ManualTextureViews>()
+        .insert(view_handle, view);
+
+    let (send_size, recv_size) = flume::bounded::<(i32, i32)>(1);
     let (send_close_code, recv_close_code) = oneshot::channel::<i32>();
-
-    let (view_handle, dmabuf_fd) =
-        world.resource_scope(|world, mut manual_texture_views: Mut<ManualTextureViews>| {
-            let view_handle = loop {
-                let view_handle = ManualTextureViewHandle(rand::random());
-                if !manual_texture_views.contains_key(&view_handle) {
-                    break view_handle;
-                }
-            };
-
-            let dmabuf_fd = world.resource_scope(|world, render_device: Mut<RenderDevice>| {
-                render::setup_render_target(
-                    DEFAULT_SIZE,
-                    view_handle,
-                    manual_texture_views.as_mut(),
-                    render_device.as_ref(),
-                )
-            });
-
-            (view_handle, dmabuf_fd)
-        });
-
-    thread::spawn(move || run(app_id, dmabuf_fd, send_close_code));
+    thread::spawn(move || run(app_id, dmabuf_fd, send_size, send_close_code));
     world.entity_mut(entity).insert(AdwaitaWindow {
         render_target_view_handle: view_handle,
+        recv_size,
         recv_close_code: SyncWrapper::new(recv_close_code),
     });
 }
@@ -116,9 +113,15 @@ fn change_default_render_target(
     }
 }
 
-fn run(app_id: String, dmabuf_fd: i32, send_close_code: oneshot::Sender<i32>) {
+fn run(
+    app_id: String,
+    dmabuf_fd: i32,
+    send_size: flume::Sender<(i32, i32)>,
+    send_close_code: oneshot::Sender<i32>,
+) {
     let app = adw::Application::builder().application_id(app_id).build();
 
+    let send_size = Arc::new(send_size);
     app.connect_activate(move |app| {
         let header_bar = adw::HeaderBar::new();
 
@@ -132,20 +135,20 @@ fn run(app_id: String, dmabuf_fd: i32, send_close_code: oneshot::Sender<i32>) {
             .build();
 
         let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        // content.append(&header_bar);
+        content.append(&header_bar);
         content.append(&graphics_offload);
 
-        glib::timeout_add_local(Duration::from_millis(100), {
-            let graphics_offload = graphics_offload.clone();
-            move || {
-                graphics_offload.queue_draw();
-                glib::ControlFlow::Continue
-            }
-        });
+        // glib::timeout_add_local(Duration::from_millis(100), {
+        //     let graphics_offload = graphics_offload.clone();
+        //     let send_size = send_size.clone();
+        //     move || {
+        //         graphics_offload.queue_draw();
+        //         let (width, height) = (graphics_offload.width(), graphics_offload.height());
+        //         _ = send_size.try_send((width, height));
 
-        // glib::idle_add(move || {
-        //     graphics_offload.queue_draw();
-        //     glib::ControlFlow::Continue
+        //         info!("new size = {width} x {height}");
+        //         glib::ControlFlow::Continue
+        //     }
         // });
 
         let window = adw::ApplicationWindow::builder()
@@ -155,9 +158,48 @@ fn run(app_id: String, dmabuf_fd: i32, send_close_code: oneshot::Sender<i32>) {
             .default_height(720)
             .content(&content)
             .build();
+
         window.present();
+
+        window
+            .surface()
+            .unwrap()
+            .connect_notify_local(Some("state"), {
+                let window = window.clone();
+                let send_size = send_size.clone();
+                move |_, _| {
+                    let (width, height) = (window.width(), window.height());
+                    _ = send_size.send((width, height));
+                }
+            });
+
+        window.connect_default_width_notify({
+            let send_size = send_size.clone();
+            move |window| {
+                let (width, height) = (window.width(), window.height());
+                _ = send_size.send((width, height));
+            }
+        });
+
+        window.connect_default_height_notify({
+            let send_size = send_size.clone();
+            move |window| {
+                let (width, height) = (window.width(), window.height());
+                _ = send_size.send((width, height));
+            }
+        });
     });
 
     let close_code = app.run().value();
-    let _ = send_close_code.send(close_code);
+    _ = send_close_code.send(close_code);
+}
+
+fn update_windows(mut windows: Query<&mut AdwaitaWindow>) {
+    for mut window in &mut windows {
+        let Some((width, height)) = window.recv_size.try_iter().last() else {
+            continue;
+        };
+
+        info!("new size = {width}x{height}");
+    }
 }

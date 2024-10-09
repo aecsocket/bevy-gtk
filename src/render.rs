@@ -105,12 +105,22 @@ const DMABUF_FORMAT: u32 = u32::from_le_bytes(*b"AR24"); // ARGB8888
 const VK_FORMAT: vk::Format = vk::Format::R8G8B8A8_SRGB;
 const TEXTURE_FORMAT: TextureFormat = TextureFormat::Rgba8UnormSrgb;
 
-pub fn setup_render_target(
-    size: UVec2,
-    manual_texture_view_handle: ManualTextureViewHandle,
-    manual_texture_views: &mut ManualTextureViews,
-    render_device: &RenderDevice,
-) -> i32 {
+pub fn setup_render_target(size: UVec2, render_device: &RenderDevice) -> (ManualTextureView, i32) {
+    struct DropGuard {
+        device: ash::Device,
+        memory: vk::DeviceMemory,
+        image: vk::Image,
+    }
+
+    impl Drop for DropGuard {
+        fn drop(&mut self) {
+            unsafe {
+                self.device.destroy_image(self.image, None);
+                self.device.free_memory(self.memory, None);
+            }
+        }
+    }
+
     let wgpu_device = render_device.wgpu_device();
     let (texture, fd) = unsafe {
         let r = wgpu_device.as_hal::<vulkan::Api, _, _>(|hal_device| {
@@ -185,28 +195,29 @@ pub fn setup_render_target(
             }
             .expect("failed to get fd for allocated memory");
 
-            let texture = unsafe {
-                vulkan::Device::texture_from_raw(
-                    image,
-                    &wgpu_hal::TextureDescriptor {
-                        label: Some("adwaita_render_target"),
-                        size: wgpu::Extent3d {
-                            width: size.x,
-                            height: size.y,
-                            depth_or_array_layers: 1,
-                        },
-                        mip_level_count: 1,
-                        sample_count: 1,
-                        dimension: wgpu::TextureDimension::D2,
-                        format: TEXTURE_FORMAT,
-                        usage: wgpu_hal::TextureUses::COPY_SRC
-                            | wgpu_hal::TextureUses::COLOR_TARGET,
-                        memory_flags: wgpu_hal::MemoryFlags::empty(),
-                        view_formats: Vec::new(),
-                    },
-                    None, // todo cleanup memory and image here
-                )
+            let texture_desc = wgpu_hal::TextureDescriptor {
+                label: Some("adwaita_render_target"),
+                size: wgpu::Extent3d {
+                    width: size.x,
+                    height: size.y,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: TEXTURE_FORMAT,
+                usage: wgpu_hal::TextureUses::COPY_SRC | wgpu_hal::TextureUses::COLOR_TARGET,
+                memory_flags: wgpu_hal::MemoryFlags::empty(),
+                view_formats: Vec::new(),
             };
+
+            let drop_guard = Box::new(DropGuard {
+                device: hal_device.raw_device().clone(),
+                memory,
+                image,
+            });
+            let texture =
+                unsafe { vulkan::Device::texture_from_raw(image, &texture_desc, Some(drop_guard)) };
 
             let texture = unsafe {
                 wgpu_device.create_texture_from_hal::<vulkan::Api>(
@@ -242,9 +253,7 @@ pub fn setup_render_target(
         format: wgpu::TextureFormat::Rgba8UnormSrgb,
     };
 
-    manual_texture_views.insert(manual_texture_view_handle, manual_texture_view);
-
-    fd
+    (manual_texture_view, fd)
 }
 
 pub fn build_dmabuf_texture(size: UVec2, fd: i32) -> gdk::Texture {
