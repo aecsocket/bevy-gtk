@@ -160,16 +160,16 @@ fn run(
 ) {
     let app = adw::Application::builder().application_id(app_id).build();
 
+    let recv_dmabuf_info = Arc::new(recv_dmabuf_info);
     app.connect_activate(move |app| {
         let header_bar = adw::HeaderBar::new();
 
-        // let texture = render::build_dmabuf_texture(DEFAULT_SIZE, dmabuf_fd);
-        // let picture = gtk::Picture::builder().paintable(&texture).build();
+        let picture = gtk::Picture::new();
         let graphics_offload = gtk::GraphicsOffload::builder()
             .black_background(true)
             .hexpand(true)
             .vexpand(true)
-            // .child(&picture)
+            .child(&picture)
             .build();
 
         let frame = {
@@ -217,12 +217,30 @@ fn run(
         let window = adw::ApplicationWindow::builder()
             .application(app)
             .title("First App")
-            .default_width(1280)
-            .default_height(720)
+            .default_width(frame_width.load(Ordering::SeqCst))
+            .default_height(frame_height.load(Ordering::SeqCst))
             .content(&content)
             .build();
 
         window.present();
+
+        let recv_dmabuf_info = recv_dmabuf_info.clone();
+        glib::idle_add_local(move || {
+            let dmabuf_info = match recv_dmabuf_info.try_recv() {
+                Ok(info) => info,
+                Err(flume::TryRecvError::Empty) => {
+                    return glib::ControlFlow::Continue;
+                }
+                Err(flume::TryRecvError::Disconnected) => {
+                    return glib::ControlFlow::Break;
+                }
+            };
+
+            let texture = render::build_dmabuf_texture(dmabuf_info);
+            picture.set_paintable(Some(&texture));
+
+            glib::ControlFlow::Continue
+        });
     });
 
     let close_code = app.run().value();

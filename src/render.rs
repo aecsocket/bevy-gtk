@@ -1,4 +1,9 @@
-use std::{num::NonZero, os::raw::c_void, sync::Arc};
+use std::{
+    fs::File,
+    num::NonZero,
+    os::{fd::FromRawFd, raw::c_void},
+    sync::Arc,
+};
 
 use ash::vk;
 use bevy::{
@@ -101,6 +106,7 @@ fn create_renderer() -> RenderCreation {
 const DMABUF_MODIFIER: u64 = 0; // DRM_FORMAT_MOD_LINEAR
 
 // https://github.com/torvalds/linux/blob/master/include/uapi/drm/drm_fourcc.h
+// Why isn't this RGBA8? I don't know! But this works!
 const DMABUF_FORMAT: u32 = u32::from_le_bytes(*b"AR24"); // ARGB8888
 const VK_FORMAT: vk::Format = vk::Format::R8G8B8A8_SRGB;
 const TEXTURE_FORMAT: TextureFormat = TextureFormat::Rgba8UnormSrgb;
@@ -114,6 +120,7 @@ pub fn setup_render_target(
         device: ash::Device,
         memory: vk::DeviceMemory,
         image: vk::Image,
+        dmabuf_fd: i32,
     }
 
     impl Drop for DropGuard {
@@ -122,6 +129,9 @@ pub fn setup_render_target(
                 self.device.destroy_image(self.image, None);
                 self.device.free_memory(self.memory, None);
             }
+
+            let dmabuf = unsafe { File::from_raw_fd(self.dmabuf_fd) };
+            drop(dmabuf);
         }
     }
 
@@ -194,7 +204,7 @@ pub fn setup_render_target(
                 handle_type: vk::ExternalMemoryHandleTypeFlags::OPAQUE_FD,
                 ..default()
             };
-            let fd = unsafe {
+            let dmabuf_fd = unsafe {
                 ash::extensions::khr::ExternalMemoryFd::new(instance, vk_device)
                     .get_memory_fd(&get_memory_info)
             }
@@ -220,6 +230,7 @@ pub fn setup_render_target(
                 device: hal_device.raw_device().clone(),
                 memory,
                 image,
+                dmabuf_fd,
             });
             let texture =
                 unsafe { vulkan::Device::texture_from_raw(image, &texture_desc, Some(drop_guard)) };
@@ -245,7 +256,7 @@ pub fn setup_render_target(
                 )
             };
 
-            (texture, fd)
+            (texture, dmabuf_fd)
         });
         r.unwrap()
     };
