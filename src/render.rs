@@ -1,4 +1,4 @@
-use std::{os::raw::c_void, sync::Arc};
+use std::{num::NonZero, os::raw::c_void, sync::Arc};
 
 use ash::vk;
 use bevy::{
@@ -17,7 +17,7 @@ use gtk::gdk;
 use wgpu::TextureFormat;
 use wgpu_hal::{vulkan, Instance};
 
-use crate::{hal_custom, AdwaitaPlugin};
+use crate::{hal_custom, AdwaitaPlugin, DmabufInfo};
 
 impl AdwaitaPlugin {
     #[must_use]
@@ -105,7 +105,11 @@ const DMABUF_FORMAT: u32 = u32::from_le_bytes(*b"AR24"); // ARGB8888
 const VK_FORMAT: vk::Format = vk::Format::R8G8B8A8_SRGB;
 const TEXTURE_FORMAT: TextureFormat = TextureFormat::Rgba8UnormSrgb;
 
-pub fn setup_render_target(size: UVec2, render_device: &RenderDevice) -> (ManualTextureView, i32) {
+pub fn setup_render_target(
+    width: NonZero<u32>,
+    height: NonZero<u32>,
+    render_device: &RenderDevice,
+) -> (ManualTextureView, i32) {
     struct DropGuard {
         device: ash::Device,
         memory: vk::DeviceMemory,
@@ -121,6 +125,7 @@ pub fn setup_render_target(size: UVec2, render_device: &RenderDevice) -> (Manual
         }
     }
 
+    let (width, height) = (width.get(), height.get());
     let wgpu_device = render_device.wgpu_device();
     let (texture, fd) = unsafe {
         let r = wgpu_device.as_hal::<vulkan::Api, _, _>(|hal_device| {
@@ -137,8 +142,8 @@ pub fn setup_render_target(size: UVec2, render_device: &RenderDevice) -> (Manual
                 image_type: vk::ImageType::TYPE_2D,
                 format: VK_FORMAT,
                 extent: vk::Extent3D {
-                    width: size.x,
-                    height: size.y,
+                    width,
+                    height,
                     depth: 1,
                 },
                 mip_levels: 1,
@@ -198,8 +203,8 @@ pub fn setup_render_target(size: UVec2, render_device: &RenderDevice) -> (Manual
             let texture_desc = wgpu_hal::TextureDescriptor {
                 label: Some("adwaita_render_target"),
                 size: wgpu::Extent3d {
-                    width: size.x,
-                    height: size.y,
+                    width,
+                    height,
                     depth_or_array_layers: 1,
                 },
                 mip_level_count: 1,
@@ -225,8 +230,8 @@ pub fn setup_render_target(size: UVec2, render_device: &RenderDevice) -> (Manual
                     &wgpu::TextureDescriptor {
                         label: Some("adwaita_render_target"),
                         size: wgpu::Extent3d {
-                            width: size.x,
-                            height: size.y,
+                            width,
+                            height,
                             depth_or_array_layers: 1,
                         },
                         mip_level_count: 1,
@@ -249,27 +254,29 @@ pub fn setup_render_target(size: UVec2, render_device: &RenderDevice) -> (Manual
 
     let manual_texture_view = ManualTextureView {
         texture_view: texture_view.into(),
-        size,
+        size: UVec2::new(width, height),
         format: wgpu::TextureFormat::Rgba8UnormSrgb,
     };
 
     (manual_texture_view, fd)
 }
 
-pub fn build_dmabuf_texture(size: UVec2, fd: i32) -> gdk::Texture {
+pub fn build_dmabuf_texture(info: DmabufInfo) -> gdk::Texture {
+    let DmabufInfo { width, height, fd } = info;
+    let (width, height) = (width.get(), height.get());
+
     // https://docs.gtk.org/gdk4/class.DmabufTextureBuilder.html
 
     let builder = gdk::DmabufTextureBuilder::new();
-    builder.set_width(size.x);
-    builder.set_height(size.y);
+    builder.set_width(width);
+    builder.set_height(height);
     builder.set_fourcc(DMABUF_FORMAT);
     builder.set_modifier(DMABUF_MODIFIER);
 
     builder.set_n_planes(1);
-    // plane 0
     builder.set_fd(0, fd);
     builder.set_offset(0, 0);
-    builder.set_stride(0, size.x * 4); // bytes per row
+    builder.set_stride(0, width * 4); // bytes per row
 
     unsafe { builder.build() }.expect("failed to build dmabuf texture")
 }
