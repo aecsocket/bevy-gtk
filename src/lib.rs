@@ -278,6 +278,8 @@ fn update_frame_size(
     render_device: Res<RenderDevice>,
     mut manual_texture_views: ResMut<ManualTextureViews>,
 ) {
+    const WORKING_MULTIPLES: u32 = 64;
+
     for (entity, mut window) in &mut windows {
         let span = trace_span!("update", window = %entity);
         let _span = span.enter();
@@ -288,8 +290,8 @@ fn update_frame_size(
         );
         // TODO fix this
         let (width, height) = (
-            (width as u32 / 64).max(1) * 64,
-            (height as u32 / 64).max(1) * 64,
+            (width as u32 / WORKING_MULTIPLES).max(1) * WORKING_MULTIPLES,
+            (height as u32).max(1),
         );
         let size = UVec2::new(width, height);
         if Some(size) == window.last_frame_size {
