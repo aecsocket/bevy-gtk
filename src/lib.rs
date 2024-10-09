@@ -223,7 +223,6 @@ fn run(
             width_listener.set_draw_func({
                 let frame_width = frame_width.clone();
                 move |_, _, width, _| {
-                    info!("-- new width: {width}");
                     frame_width.store(width, Ordering::SeqCst);
                 }
             });
@@ -232,29 +231,23 @@ fn run(
             height_listener.set_draw_func({
                 let frame_height = frame_height.clone();
                 move |_, _, _, height| {
-                    info!("-- new height: {height}");
                     frame_height.store(height, Ordering::SeqCst);
                 }
             });
 
             let frame_content_h = gtk::Box::new(gtk::Orientation::Horizontal, 0);
             frame_content_h.append(&height_listener);
-            frame_content_h.append(&graphics_offload); // todo
+            frame_content_h.append(&graphics_offload);
 
             let frame_content_v = gtk::Box::new(gtk::Orientation::Vertical, 0);
             frame_content_v.append(&width_listener);
             frame_content_v.append(&frame_content_h);
 
-            // frame_content_v.set_margin_start(10);
-            // frame_content_v.set_margin_end(10);
-            // frame_content_v.set_margin_top(10);
-            // frame_content_v.set_margin_bottom(10);
-
             frame_content_v
         };
 
         let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        content.append(&header_bar);
+        // content.append(&header_bar);
         content.append(&frame);
 
         let window = adw::ApplicationWindow::builder()
@@ -285,22 +278,20 @@ fn update_frame_size(
     render_device: Res<RenderDevice>,
     mut manual_texture_views: ResMut<ManualTextureViews>,
 ) {
-    info!(".. updating frame size");
     for (entity, mut window) in &mut windows {
         let span = trace_span!("update", window = %entity);
         let _span = span.enter();
 
-        info!(".. A");
         let (width, height) = (
             window.frame_width.load(Ordering::SeqCst),
             window.frame_height.load(Ordering::SeqCst),
         );
+        // TODO fix this
         let (width, height) = (
             (width as u32 / 64).max(1) * 64,
             (height as u32 / 64).max(1) * 64,
         );
         let size = UVec2::new(width, height);
-        info!(".. B");
         if Some(size) == window.last_frame_size {
             continue;
         }
@@ -309,11 +300,9 @@ fn update_frame_size(
 
         let (new_texture_view, dmabuf_fd) =
             render::setup_render_target(size, render_device.as_ref());
-        info!(".. C");
         let old_texture_view = manual_texture_views
             .insert(window.render_target_view_handle, new_texture_view)
             .map(|old| old.texture_view);
-        info!(".. D");
 
         // However, we don't want to give this new dmabuf over to the window
         // yet, because we've literally just made it. It'll have some garbage
@@ -327,7 +316,6 @@ fn update_frame_size(
         // If the old value is dropped, it's OK - the associated texture view
         // will just be buffered up in the channel, and dropped the next time
         // the window swaps its target.
-        info!(".. E");
         window.next_draw_info.store(
             Some(Box::new(DrawInfo {
                 dmabuf: dmabuf_info,
@@ -335,7 +323,6 @@ fn update_frame_size(
             })),
             Ordering::SeqCst,
         );
-        info!(".. F");
     }
 }
 
