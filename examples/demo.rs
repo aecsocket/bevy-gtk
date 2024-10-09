@@ -1,5 +1,5 @@
 use bevy::prelude::*;
-use bevy_mod_adwaita::AdwaitaPlugin;
+use bevy_mod_adwaita::{AdwaitaPlugin, AdwaitaWindow, PrimaryAdwaitaWindow};
 
 fn main() -> AppExit {
     App::new()
@@ -7,16 +7,20 @@ fn main() -> AppExit {
             DefaultPlugins
                 .set(AdwaitaPlugin::window_plugin())
                 .set(AdwaitaPlugin::render_plugin()),
-            AdwaitaPlugin {
-                application_id: "io.github.aecsocket.bevy_mod_adwaita".into(),
-            },
+            AdwaitaPlugin,
         ))
-        .add_systems(Startup, setup)
+        .add_systems(Startup, (spawn_adwaita_window, setup_scene))
         .run()
 }
 
+fn spawn_adwaita_window(mut commands: Commands) {
+    commands
+        .spawn(PrimaryAdwaitaWindow)
+        .add(AdwaitaWindow::open("io.github.aecsocket.bevy_mod_adwaita"));
+}
+
 /// set up a simple 3D scene
-fn setup(
+fn setup_scene(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,

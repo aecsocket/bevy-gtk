@@ -21,6 +21,8 @@ oneshot = "0.1.8"
 flume = "0.11.0"
 thiserror = "1.0.64"
 log = "0.4.22"
+sync_wrapper = "1.0.1"
+rand = "0.8.5"
 
 [dependencies.adw]
 package = "libadwaita"
