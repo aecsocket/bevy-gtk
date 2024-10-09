@@ -196,17 +196,25 @@ fn run(
 
     let current_texture_view = Arc::new(AtomicOptionBox::<TextureView>::none());
     app.connect_activate(move |app| {
-        let header_bar = adw::HeaderBar::new();
-
-        let frame_picture = gtk::Picture::new();
-        let graphics_offload = gtk::GraphicsOffload::builder()
-            .black_background(true)
-            .hexpand(true)
-            .vexpand(true)
-            .child(&frame_picture)
+        let window_controls = gtk::WindowControls::builder()
+            .side(gtk::PackType::End)
+            .halign(gtk::Align::End)
+            .valign(gtk::Align::Start)
+            .margin_start(6)
+            .margin_end(6)
+            .margin_top(6)
+            .margin_bottom(6)
             .build();
 
+        let frame_picture = gtk::Picture::new();
         let frame = {
+            let graphics_offload = gtk::GraphicsOffload::builder()
+                .black_background(true)
+                .hexpand(true)
+                .vexpand(true)
+                .child(&frame_picture)
+                .build();
+
             // Use a trick to detect when the actual "frame" (Bevy app content)
             // is resized, and send this new frame size to the app.
             // https://stackoverflow.com/questions/70488187/get-calculated-size-of-widget-in-gtk-4-0
@@ -246,9 +254,9 @@ fn run(
             frame_content_v
         };
 
-        let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        // content.append(&header_bar);
-        content.append(&frame);
+        let content = gtk::Overlay::new();
+        content.set_child(Some(&frame));
+        content.add_overlay(&window_controls);
 
         let window = adw::ApplicationWindow::builder()
             .application(app)
@@ -315,9 +323,8 @@ fn update_frame_size(
             size,
             fd: dmabuf_fd,
         };
-        // If the old value is dropped, it's OK - the associated texture view
-        // will just be buffered up in the channel, and dropped the next time
-        // the window swaps its target.
+        // If the old value is dropped, it's OK - that texture view will be
+        // dropped, and GPU resources will be cleaned up.
         window.next_draw_info.store(
             Some(Box::new(DrawInfo {
                 dmabuf: dmabuf_info,

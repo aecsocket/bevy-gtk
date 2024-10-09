@@ -1,6 +1,5 @@
 use std::{
     fs::File,
-    num::NonZero,
     os::{fd::FromRawFd, raw::c_void},
     sync::Arc,
 };
