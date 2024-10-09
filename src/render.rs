@@ -113,17 +113,12 @@ const DMABUF_FORMAT: u32 = u32::from_le_bytes(*b"AB24"); // ABGR8888
 const VK_FORMAT: vk::Format = vk::Format::R8G8B8A8_SRGB;
 const TEXTURE_FORMAT: TextureFormat = TextureFormat::Rgba8UnormSrgb;
 
-pub fn setup_render_target(
-    width: NonZero<u32>,
-    height: NonZero<u32>,
-    render_device: &RenderDevice,
-) -> (ManualTextureView, i32) {
-    let (width, height) = (width.get(), height.get());
+pub fn setup_render_target(size: UVec2, render_device: &RenderDevice) -> (ManualTextureView, i32) {
     let wgpu_device = render_device.wgpu_device();
     let (texture, dmabuf_fd) = unsafe {
         let r = wgpu_device.as_hal::<vulkan::Api, _, _>(|hal_device| {
             let hal_device = hal_device.expect("`RenderDevice` is not a vulkan device");
-            create_target_from_hal(wgpu_device, hal_device, width, height)
+            create_target_from_hal(wgpu_device, hal_device, size.x, size.y)
         });
         r.unwrap()
     };
@@ -132,7 +127,7 @@ pub fn setup_render_target(
 
     let manual_texture_view = ManualTextureView {
         texture_view: texture_view.into(),
-        size: UVec2::new(width, height),
+        size,
         format: wgpu::TextureFormat::Rgba8UnormSrgb,
     };
 
@@ -283,21 +278,20 @@ fn create_target_from_hal(
 }
 
 pub fn build_dmabuf_texture(info: DmabufInfo) -> gdk::Texture {
-    let DmabufInfo { width, height, fd } = info;
-    let (width, height) = (width.get(), height.get());
+    let DmabufInfo { size, fd } = info;
 
     // https://docs.gtk.org/gdk4/class.DmabufTextureBuilder.html
 
     let builder = gdk::DmabufTextureBuilder::new();
-    builder.set_width(width);
-    builder.set_height(height);
+    builder.set_width(size.x);
+    builder.set_height(size.y);
     builder.set_fourcc(DMABUF_FORMAT);
     builder.set_modifier(DMABUF_MODIFIER);
 
     builder.set_n_planes(1);
     builder.set_fd(0, fd);
     builder.set_offset(0, 0);
-    builder.set_stride(0, width * 4); // bytes per row
+    builder.set_stride(0, size.x * 4); // bytes per row
 
     unsafe { builder.build() }.expect("should be a valid dmabuf texture")
 }
