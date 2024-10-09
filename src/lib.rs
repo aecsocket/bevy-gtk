@@ -11,16 +11,18 @@ use std::{
 };
 
 use adw::prelude::*;
+use atomicbox::AtomicOptionBox;
 use bevy::{
     ecs::system::EntityCommand,
     prelude::*,
     render::{
         camera::{ManualTextureViewHandle, ManualTextureViews, RenderTarget},
+        render_resource::TextureView,
         renderer::RenderDevice,
     },
     window::WindowRef,
 };
-use gtk::{gdk, glib};
+use gtk::glib;
 use sync_wrapper::SyncWrapper;
 
 #[derive(Debug)]
@@ -49,10 +51,12 @@ impl Plugin for AdwaitaPlugin {
 pub struct AdwaitaWindow {
     recv_close_code: SyncWrapper<oneshot::Receiver<i32>>,
     render_target_view_handle: ManualTextureViewHandle,
-    send_dmabuf_info: flume::Sender<DmabufInfo>,
+    send_old_texture_view: flume::Sender<TextureView>,
+    dmabuf_info: Arc<AtomicOptionBox<DmabufInfo>>,
     frame_width: Arc<AtomicI32>,
     frame_height: Arc<AtomicI32>,
     last_frame_size: Option<(NonZero<u32>, NonZero<u32>)>,
+    dmabuf_info_to_send: Option<DmabufInfo>,
 }
 
 #[derive(Debug, Clone, Copy, Component, Reflect)]
@@ -109,18 +113,21 @@ fn open(
         }
     };
 
-    let (send_dmabuf_info, recv_dmabuf_info) = flume::bounded::<DmabufInfo>(1);
+    let (send_old_texture_view, recv_old_texture_view) = flume::bounded::<TextureView>(2);
+    let dmabuf_info = Arc::new(AtomicOptionBox::<DmabufInfo>::none());
     let (frame_width, frame_height) = (
         Arc::new(AtomicI32::new(width_i)),
         Arc::new(AtomicI32::new(height_i)),
     );
     let (send_close_code, recv_close_code) = oneshot::channel::<i32>();
     thread::spawn({
+        let dmabuf_info = dmabuf_info.clone();
         let (frame_width, frame_height) = (frame_width.clone(), frame_height.clone());
         move || {
             run(
                 app_id,
-                recv_dmabuf_info,
+                recv_old_texture_view,
+                dmabuf_info,
                 frame_width,
                 frame_height,
                 send_close_code,
@@ -130,12 +137,28 @@ fn open(
     world.entity_mut(entity).insert(AdwaitaWindow {
         recv_close_code: SyncWrapper::new(recv_close_code),
         render_target_view_handle: view_handle,
-        send_dmabuf_info,
+        send_old_texture_view,
+        dmabuf_info,
         frame_width,
         frame_height,
         last_frame_size: None,
+        dmabuf_info_to_send: None,
     });
 }
+
+// How does the texture creation work?
+// - Window is initialized or resized and updates the `frame_width`, `frame_height`
+// - App detects the new size is different from the old one
+// - App allocates a new texture for the render target
+// - App takes out the old render target texture view and gives ownership of it
+//   to the window, blocking until the window receives it
+//   - We can buffer some up (let's say 8)
+// - Window takes the render target texture view and just holds on to it for now
+// - App performs one render pass, and the render target now has content in it
+// - App sends the new dmabuf into over to the window
+// - Window receives the new dmabuf and updates the Paintable to point to thisk
+//   new dmabuf
+// - Window drops any texture view it still has
 
 /// Info that that the Adwaita window requires to be able to make a
 /// `GraphicsOffload` for rendering the Bevy app contents.
@@ -151,24 +174,29 @@ struct DmabufInfo {
 
 fn run(
     app_id: String,
-    recv_dmabuf_info: flume::Receiver<DmabufInfo>,
+    recv_old_texture_view: flume::Receiver<TextureView>,
+    dmabuf_info: Arc<AtomicOptionBox<DmabufInfo>>,
     frame_width: Arc<AtomicI32>,
     frame_height: Arc<AtomicI32>,
     send_close_code: oneshot::Sender<i32>,
 ) {
     let app = adw::Application::builder().application_id(app_id).build();
 
-    let recv_dmabuf_info = Arc::new(recv_dmabuf_info);
+    let recv_old_texture_view = recv_old_texture_view.clone();
     app.connect_activate(move |app| {
         let header_bar = adw::HeaderBar::new();
 
+        let frame_picture = gtk::Picture::new();
         let graphics_offload = gtk::GraphicsOffload::builder()
             .black_background(true)
             .hexpand(true)
             .vexpand(true)
+            .child(&frame_picture)
             .build();
 
         let frame = {
+            // Use a trick to detect when the actual "frame" (Bevy app content)
+            // is resized, and send this new frame size to the app.
             // https://stackoverflow.com/questions/70488187/get-calculated-size-of-widget-in-gtk-4-0
             // +-----------------------+
             // |          WL           |  WL: width_listener  (height 0)
@@ -225,16 +253,11 @@ fn run(
 
         window.present();
 
-        let recv_dmabuf_info = recv_dmabuf_info.clone();
+        let recv_old_texture_view = recv_old_texture_view.clone();
+        let dmabuf_info = dmabuf_info.clone();
+        let frame_picture = frame_picture.clone();
         glib::idle_add_local(move || {
-            let Ok(dmabuf_info) = recv_dmabuf_info.try_recv() else {
-                return glib::ControlFlow::Continue;
-            };
-
-            let texture = render::build_dmabuf_texture(dmabuf_info);
-            let picture = gtk::Picture::builder().paintable(&texture).build();
-            graphics_offload.set_child(Some(&picture));
-
+            poll_window(&recv_old_texture_view, &dmabuf_info, &frame_picture);
             glib::ControlFlow::Continue
         });
     });
@@ -251,6 +274,13 @@ fn update_frame_size(
     for (entity, mut window) in &mut windows {
         let span = trace_span!("update", window = %entity);
         let _span = span.enter();
+
+        // See below.
+        if let Some(dmabuf_info) = window.dmabuf_info_to_send.take() {
+            window
+                .dmabuf_info
+                .store(Some(Box::new(dmabuf_info)), Ordering::SeqCst);
+        }
 
         let (width, height) = (
             window.frame_width.load(Ordering::SeqCst),
@@ -269,14 +299,63 @@ fn update_frame_size(
             continue;
         }
         window.last_frame_size = Some((width, height));
+        trace!("Updating render target size to {width}x{height}");
 
-        let (texture_view, fd) = render::setup_render_target(width, height, render_device.as_ref());
-        info!("New frame size {width}x{height} rendering to {fd}");
-        manual_texture_views.insert(window.render_target_view_handle, texture_view);
-        _ = window
-            .send_dmabuf_info
-            .try_send(DmabufInfo { width, height, fd });
+        let (new_texture_view, dmabuf_fd) =
+            render::setup_render_target(width, height, render_device.as_ref());
+        let old_texture_view = manual_texture_views
+            .insert(window.render_target_view_handle, new_texture_view)
+            .map(|old| old.texture_view);
+
+        // Give ownership of the old texture view (the one that the window is
+        // currently rendering) over to the window.
+        // We don't want to drop it here ourselves, because the window might
+        // still be using these resources (this is also why we potentially
+        // block here, in order to not drop this).
+        // As soon as the window swaps the texture view it's using, it'll drain
+        // this send channel, and all those old texture views will be dropped.
+        if let Some(old_texture_view) = old_texture_view {
+            _ = window.send_old_texture_view.send(old_texture_view);
+        }
+
+        // However, we don't want to give this new dmabuf over to the window
+        // yet, because we've literally just made it. It'll have some garbage
+        // memory, and we don't want the window to try reading that.
+        // Instead, we wait until the render app has done one full render (until
+        // the new texture view has actual content in it), and only then send
+        // over the new dmabuf info.
+        //
+        // Currently, we send this dmabuf info on the next update, when
+        // we're guaranteed that we've drawn a frame (see the top of this fn).
+        // But in theory, we can do this immediately after `RenderSet::Render`
+        // in the render world, which would reduce latency.
+        let dmabuf_info = DmabufInfo {
+            width,
+            height,
+            fd: dmabuf_fd,
+        };
+        // If the old value is dropped, it's OK - the associated texture view
+        // will just be buffered up in the channel, and dropped the next time
+        // the window swaps its target.
+        window.dmabuf_info_to_send = Some(dmabuf_info);
     }
+}
+
+fn poll_window(
+    recv_old_texture_view: &flume::Receiver<TextureView>,
+    dmabuf_info: &Arc<AtomicOptionBox<DmabufInfo>>,
+    frame_picture: &gtk::Picture,
+) {
+    let Some(dmabuf_info) = dmabuf_info.take(Ordering::SeqCst) else {
+        return;
+    };
+
+    let paintable = render::build_dmabuf_texture(*dmabuf_info);
+    frame_picture.set_paintable(Some(&paintable));
+
+    // Take and drop ownership of all the old texture views we may have been
+    // using, to clean them up on the GPU side.
+    for _ in recv_old_texture_view.try_iter() {}
 }
 
 fn change_default_render_target(

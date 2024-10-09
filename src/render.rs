@@ -9,7 +9,7 @@ use ash::vk;
 use bevy::{
     prelude::*,
     render::{
-        camera::{ManualTextureView, ManualTextureViewHandle, ManualTextureViews},
+        camera::ManualTextureView,
         renderer::{
             RenderAdapter, RenderAdapterInfo, RenderDevice, RenderInstance, RenderQueue,
             WgpuWrapper,
@@ -103,11 +103,13 @@ fn create_renderer() -> RenderCreation {
     futures_lite::future::block_on(do_async)
 }
 
+// https://github.com/dzfranklin/drm-fourcc-rs/blob/main/src/consts.rs
+// const DMABUF_MODIFIER: u64 = 0xff_ffff_ffff_ffff; // invalid
 const DMABUF_MODIFIER: u64 = 0; // DRM_FORMAT_MOD_LINEAR
 
 // https://github.com/torvalds/linux/blob/master/include/uapi/drm/drm_fourcc.h
 // Why isn't this RGBA8? I don't know! But this works!
-const DMABUF_FORMAT: u32 = u32::from_le_bytes(*b"AR24"); // ARGB8888
+const DMABUF_FORMAT: u32 = u32::from_le_bytes(*b"AB24"); // wrong // ABGR8888
 const VK_FORMAT: vk::Format = vk::Format::R8G8B8A8_SRGB;
 const TEXTURE_FORMAT: TextureFormat = TextureFormat::Rgba8UnormSrgb;
 
@@ -159,7 +161,7 @@ pub fn setup_render_target(
                 mip_levels: 1,
                 array_layers: 1,
                 samples: vk::SampleCountFlags::TYPE_1,
-                tiling: vk::ImageTiling::LINEAR,
+                tiling: vk::ImageTiling::LINEAR, // or OPTIMAL?
                 usage: vk::ImageUsageFlags::TRANSFER_SRC | vk::ImageUsageFlags::COLOR_ATTACHMENT,
                 sharing_mode: vk::SharingMode::EXCLUSIVE,
                 initial_layout: vk::ImageLayout::UNDEFINED,

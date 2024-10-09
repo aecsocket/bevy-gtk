@@ -19,6 +19,7 @@ futures-lite = "2.3.0"
 tracing = "0.1.40"
 oneshot = "0.1.8"
 flume = "0.11.0"
+atomicbox = "0.4.0"
 thiserror = "1.0.64"
 log = "0.4.22"
 sync_wrapper = "1.0.1"
@@ -27,6 +28,7 @@ rand = "0.8.5"
 [dependencies.adw]
 package = "libadwaita"
 version = "0.7.0"
+features = ["v1_2"]
 
 [dependencies.gtk]
 package = "gtk4"
