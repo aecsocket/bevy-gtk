@@ -207,6 +207,15 @@ fn run(
             .build();
 
         let frame_picture = gtk::Picture::new();
+        frame_picture.add_tick_callback(|frame_picture, _| {
+            if let Some(paintable) = frame_picture.paintable() {
+                info!("invalidate..");
+                paintable.invalidate_contents();
+                frame_picture.queue_draw();
+            }
+            glib::ControlFlow::Continue
+        });
+
         let frame = {
             let graphics_offload = gtk::GraphicsOffload::builder()
                 .black_background(true)
@@ -271,8 +280,10 @@ fn run(
         let shared_draw_info = shared_draw_info.clone();
         let frame_picture = frame_picture.clone();
         let current_texture_view = current_texture_view.clone();
-        glib::idle_add_local(move || {
-            poll_window(&shared_draw_info, &frame_picture, &current_texture_view);
+
+        // don't use `glib::idle_add` so that we have some delay
+        window.add_tick_callback(move |_, _| {
+            poll_app_from_window(&shared_draw_info, &frame_picture, &current_texture_view);
             glib::ControlFlow::Continue
         });
     });
@@ -366,7 +377,7 @@ fn update_dmabufs(mut windows: Query<&mut RenderWindow>) {
     }
 }
 
-fn poll_window(
+fn poll_app_from_window(
     shared_draw_info: &Arc<AtomicOptionBox<DrawInfo>>,
     frame_picture: &gtk::Picture,
     current_texture_view: &Arc<AtomicOptionBox<TextureView>>,
@@ -375,8 +386,22 @@ fn poll_window(
         return;
     };
 
-    let paintable = render::build_dmabuf_texture(draw_info.dmabuf);
-    frame_picture.set_paintable(Some(&paintable));
+    info!("-- GOT draw info");
+
+    let texture = render::build_dmabuf_texture(draw_info.dmabuf);
+    frame_picture.set_paintable(Some(&texture));
+
+    // if frame_picture.paintable().is_none() {
+    //     info!("TEXTURE:");
+    //     info!("  flags = {:?}", texture.flags());
+    //     info!(
+    //         "  w/h = {:?} / {:?}",
+    //         texture.intrinsic_width(),
+    //         texture.intrinsic_height()
+    //     );
+
+    //     // TODO
+    // }
 
     if let Some(texture_view) = draw_info.texture_view.take() {
         current_texture_view.store(Some(Box::new(texture_view)), Ordering::SeqCst);
