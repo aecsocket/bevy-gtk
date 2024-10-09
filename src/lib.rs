@@ -1,7 +1,7 @@
 mod hal_custom;
 mod render;
 
-use std::thread;
+use std::{thread, time::Duration};
 
 use adw::prelude::*;
 use bevy::{
@@ -13,7 +13,7 @@ use bevy::{
     },
     window::WindowRef,
 };
-use gtk::gdk;
+use gtk::{gdk, glib};
 use sync_wrapper::SyncWrapper;
 
 #[derive(Debug)]
@@ -125,15 +125,28 @@ fn run(app_id: String, dmabuf_fd: i32, send_close_code: oneshot::Sender<i32>) {
         let texture = render::build_dmabuf_texture(DEFAULT_SIZE, dmabuf_fd);
         let picture = gtk::Picture::builder().paintable(&texture).build();
         let graphics_offload = gtk::GraphicsOffload::builder()
-            // .black_background(true)
+            .black_background(true)
             .hexpand(true)
             .vexpand(true)
             .child(&picture)
             .build();
 
         let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        content.append(&header_bar);
+        // content.append(&header_bar);
         content.append(&graphics_offload);
+
+        glib::timeout_add_local(Duration::from_millis(100), {
+            let graphics_offload = graphics_offload.clone();
+            move || {
+                graphics_offload.queue_draw();
+                glib::ControlFlow::Continue
+            }
+        });
+
+        // glib::idle_add(move || {
+        //     graphics_offload.queue_draw();
+        //     glib::ControlFlow::Continue
+        // });
 
         let window = adw::ApplicationWindow::builder()
             .application(app)

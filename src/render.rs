@@ -98,6 +98,11 @@ fn create_renderer() -> RenderCreation {
     futures_lite::future::block_on(do_async)
 }
 
+const DMABUF_MODIFIER: u64 = 0; // DRM_FORMAT_MOD_LINEAR
+
+// https://github.com/torvalds/linux/blob/master/include/uapi/drm/drm_fourcc.h
+const DMABUF_FORMAT: u32 = u32::from_le_bytes(*b"AR24"); // ARGB8888
+const VK_FORMAT: vk::Format = vk::Format::R8G8B8A8_SRGB;
 const TEXTURE_FORMAT: TextureFormat = TextureFormat::Rgba8UnormSrgb;
 
 pub fn setup_render_target(
@@ -120,7 +125,7 @@ pub fn setup_render_target(
             let image_create = vk::ImageCreateInfo {
                 p_next: &external_memory_image_create as *const _ as *const c_void,
                 image_type: vk::ImageType::TYPE_2D,
-                format: vk::Format::R8G8B8A8_SRGB,
+                format: VK_FORMAT,
                 extent: vk::Extent3D {
                     width: size.x,
                     height: size.y,
@@ -129,7 +134,7 @@ pub fn setup_render_target(
                 mip_levels: 1,
                 array_layers: 1,
                 samples: vk::SampleCountFlags::TYPE_1,
-                tiling: vk::ImageTiling::OPTIMAL,
+                tiling: vk::ImageTiling::LINEAR,
                 usage: vk::ImageUsageFlags::TRANSFER_SRC | vk::ImageUsageFlags::COLOR_ATTACHMENT,
                 sharing_mode: vk::SharingMode::EXCLUSIVE,
                 initial_layout: vk::ImageLayout::UNDEFINED,
@@ -193,7 +198,7 @@ pub fn setup_render_target(
                         mip_level_count: 1,
                         sample_count: 1,
                         dimension: wgpu::TextureDimension::D2,
-                        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                        format: TEXTURE_FORMAT,
                         usage: wgpu_hal::TextureUses::COPY_SRC
                             | wgpu_hal::TextureUses::COLOR_TARGET,
                         memory_flags: wgpu_hal::MemoryFlags::empty(),
@@ -216,7 +221,7 @@ pub fn setup_render_target(
                         mip_level_count: 1,
                         sample_count: 1,
                         dimension: wgpu::TextureDimension::D2,
-                        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                        format: TEXTURE_FORMAT,
                         usage: wgpu::TextureUsages::COPY_SRC
                             | wgpu::TextureUsages::RENDER_ATTACHMENT,
                         view_formats: &[],
@@ -248,11 +253,8 @@ pub fn build_dmabuf_texture(size: UVec2, fd: i32) -> gdk::Texture {
     let builder = gdk::DmabufTextureBuilder::new();
     builder.set_width(size.x);
     builder.set_height(size.y);
-    // RA24 - RGBA8888
-    // https://github.com/torvalds/linux/blob/master/include/uapi/drm/drm_fourcc.h
-    // https://github.com/Robin329/fourcc_code_convert/blob/master/shell/fourcc_code_convert.sh
-    builder.set_fourcc(0x34324152);
-    builder.set_modifier(0);
+    builder.set_fourcc(DMABUF_FORMAT);
+    builder.set_modifier(DMABUF_MODIFIER);
 
     builder.set_n_planes(1);
     // plane 0
