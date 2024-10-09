@@ -281,8 +281,8 @@ fn create_target_from_hal(
     (texture, dmabuf_fd)
 }
 
-pub fn build_dmabuf_texture(info: DmabufInfo) -> gdk::Paintable {
-    let DmabufInfo { size, fd } = info;
+pub fn build_dmabuf_texture(info: &DmabufInfo) -> gdk::Paintable {
+    let &DmabufInfo { size, fd } = info;
 
     // https://docs.gtk.org/gdk4/class.DmabufTextureBuilder.html
 
@@ -297,61 +297,7 @@ pub fn build_dmabuf_texture(info: DmabufInfo) -> gdk::Paintable {
     builder.set_offset(0, 0);
     builder.set_stride(0, size.x * 4); // bytes per row
 
-    let texture = unsafe { builder.build() }.expect("should be a valid dmabuf texture");
-    let paintable = MyPaintable::with_paintable(texture.upcast_ref());
-    paintable.upcast()
-}
-
-glib::wrapper! {
-    pub struct MyPaintable(ObjectSubclass<imp::MyPaintable>)
-        @implements gdk::Paintable;
-}
-
-impl MyPaintable {
-    pub fn new() -> Self {
-        Object::builder().build()
-    }
-
-    pub fn with_paintable(paintable: &gdk::Paintable) -> Self {
-        Object::builder().property("paintable", paintable).build()
-    }
-}
-
-mod imp {
-    use std::cell::RefCell;
-
-    use gtk::prelude::*;
-    use gtk::subclass::prelude::*;
-
-    use super::*;
-
-    #[derive(Debug, Default, glib::Properties)]
-    #[properties(wrapper_type = super::MyPaintable)]
-    pub struct MyPaintable {
-        #[property(get, set, nullable)]
-        paintable: RefCell<Option<gdk::Paintable>>,
-    }
-
-    #[glib::object_subclass]
-    impl ObjectSubclass for MyPaintable {
-        const NAME: &str = "MyPaintable";
-        type Type = super::MyPaintable;
-        type ParentType = glib::Object;
-        type Interfaces = (gdk::Paintable,);
-    }
-
-    #[glib::derived_properties]
-    impl ObjectImpl for MyPaintable {}
-
-    impl PaintableImpl for MyPaintable {
-        fn snapshot(&self, snapshot: &gdk::Snapshot, width: f64, height: f64) {
-            if let Some(paintable) = self.paintable.borrow().as_ref() {
-                paintable.snapshot(snapshot, width, height);
-            }
-        }
-
-        fn flags(&self) -> gdk::PaintableFlags {
-            gdk::PaintableFlags::SIZE
-        }
-    }
+    unsafe { builder.build() }
+        .expect("should be a valid dmabuf texture")
+        .upcast()
 }
