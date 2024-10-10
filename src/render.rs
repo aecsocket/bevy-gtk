@@ -276,6 +276,8 @@ fn create_target_from_hal(
 }
 
 pub fn create_dmabuf_texture(info: &DmabufInfo) -> gdk::Paintable {
+    const WIDTH_MULTIPLE: u32 = 64;
+
     let &DmabufInfo { size, fd } = info;
 
     // https://docs.gtk.org/gdk4/class.DmabufTextureBuilder.html

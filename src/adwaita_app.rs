@@ -4,7 +4,6 @@ use std::sync::Arc;
 use adw::prelude::*;
 use adw::{gio, glib, gtk};
 use atomicbox::AtomicOptionBox;
-use bevy::render::render_resource::TextureView;
 
 use crate::render::{self, FrameInfo};
 use crate::{AdwaitaHeaderBar, AdwaitaWindowConfig};
@@ -20,9 +19,7 @@ pub struct WindowOpen {
 }
 
 #[derive(Debug)]
-pub enum WindowCommand {
-    NewFrame(),
-}
+pub enum WindowCommand {}
 
 pub fn main_thread_loop(recv_window_open: flume::Receiver<WindowOpen>) {
     // when we `init`, this thread is marked as the main thread
@@ -192,6 +189,8 @@ impl WindowState {
             let frame = render::create_dmabuf_texture(&frame_info.dmabuf);
             self.render_target.set_paintable(Some(&frame));
             self.render_target.queue_draw();
+        } else {
+            tracing::info!("Don't have a frame yet...");
         }
 
         loop {

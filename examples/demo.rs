@@ -1,21 +1,18 @@
-use bevy::{
-    prelude::*,
-    render::{camera::RenderTarget, settings::WgpuSettings},
-    window::{PrimaryWindow, WindowRef},
-};
+use bevy::{prelude::*, render::settings::WgpuSettings};
 use bevy_mod_adwaita::{AdwaitaHeaderBar, AdwaitaWindowConfig, AdwaitaWindowPlugin};
 
 fn main() -> AppExit {
     App::new()
         .add_plugins((
             DefaultPlugins
-                // .set(AdwaitaPlugin::window_plugin())
+                .set(AdwaitaWindowPlugin::window_plugin())
                 .set(AdwaitaWindowPlugin::render_plugin(WgpuSettings::default())),
             AdwaitaWindowPlugin {
                 primary_window_config: Some(AdwaitaWindowConfig {
                     header_bar: AdwaitaHeaderBar::OverContent,
                     ..default()
                 }),
+                ..default()
             },
         ))
         .add_systems(PreStartup, setup_scene)
@@ -31,7 +28,6 @@ fn setup_scene(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    primary_window: Query<Entity, With<PrimaryWindow>>,
 ) {
     // circular base
     commands.spawn(PbrBundle {

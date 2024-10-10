@@ -22,19 +22,21 @@ use bevy::{
         settings::WgpuSettings,
         Extract, Render, RenderApp, RenderPlugin, RenderSet,
     },
-    window::WindowRef,
+    window::{ExitCondition, WindowRef},
 };
 use render::{DmabufInfo, FrameInfo};
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AdwaitaWindowPlugin {
     pub primary_window_config: Option<AdwaitaWindowConfig>,
+    pub exit_condition: ExitCondition,
 }
 
 impl Default for AdwaitaWindowPlugin {
     fn default() -> Self {
         Self {
             primary_window_config: Some(AdwaitaWindowConfig::default()),
+            exit_condition: ExitCondition::OnAllClosed,
         }
     }
 }
@@ -48,6 +50,16 @@ impl Plugin for AdwaitaWindowPlugin {
             .add_systems(PreUpdate, poll_windows)
             .observe(update_default_camera_render_target)
             .observe(update_existing_cameras_render_target);
+
+        match self.exit_condition {
+            ExitCondition::OnPrimaryClosed => {
+                app.add_systems(PostUpdate, exit_on_primary_closed);
+            }
+            ExitCondition::OnAllClosed => {
+                app.add_systems(PostUpdate, exit_on_all_closed);
+            }
+            ExitCondition::DontExit => {}
+        }
 
         let render_app = app.sub_app_mut(RenderApp);
         render_app
@@ -64,6 +76,15 @@ impl Plugin for AdwaitaWindowPlugin {
 }
 
 impl AdwaitaWindowPlugin {
+    #[must_use]
+    pub fn window_plugin() -> WindowPlugin {
+        WindowPlugin {
+            primary_window: None,
+            exit_condition: ExitCondition::DontExit,
+            close_when_requested: false,
+        }
+    }
+
     #[must_use]
     pub fn render_plugin(settings: WgpuSettings) -> RenderPlugin {
         let render_creation = render::create_renderer(settings);
@@ -230,6 +251,26 @@ fn update_existing_cameras_render_target(
     }
 }
 
+fn exit_on_primary_closed(
+    mut app_exit_events: EventWriter<AppExit>,
+    windows: Query<(), (With<AdwaitaWindow>, With<PrimaryAdwaitaWindow>)>,
+) {
+    if windows.is_empty() {
+        info!("Primary Adwaita window was closed, exiting");
+        app_exit_events.send(AppExit::Success);
+    }
+}
+
+fn exit_on_all_closed(
+    mut app_exit_events: EventWriter<AppExit>,
+    windows: Query<(), With<AdwaitaWindow>>,
+) {
+    if windows.is_empty() {
+        info!("No Adwaita windows are open, exiting");
+        app_exit_events.send(AppExit::Success);
+    }
+}
+
 fn poll_windows(
     mut commands: Commands,
     mut windows: Query<(Entity, &mut AdwaitaWindow)>,
@@ -238,7 +279,7 @@ fn poll_windows(
 ) {
     for (entity, mut window) in &mut windows {
         if window.closed.load(Ordering::SeqCst) {
-            info!("Closing window {entity} due to Adwaita window being closed");
+            info!("Adwaita window {entity} closed");
             commands.entity(entity).despawn_recursive();
             continue;
         }
@@ -251,10 +292,15 @@ fn poll_windows(
             continue;
         };
 
-        let size = UVec2::new(width.max(1), height.max(1));
+        let size = UVec2::new(
+            width.max(1),
+            // (width / WIDTH_MULTIPLE).max(1) * WIDTH_MULTIPLE,
+            height.max(1),
+        );
         if size == window.last_render_target_size {
             continue;
         }
+        info!("Window resized to {size}");
         window.last_render_target_size = size;
 
         let (manual_texture_view, dmabuf_fd) =
