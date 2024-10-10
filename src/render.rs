@@ -14,34 +14,15 @@ use bevy::{
             WgpuWrapper,
         },
         settings::{RenderCreation, WgpuSettings},
-        RenderPlugin,
     },
 };
-use gtk::{
-    gdk,
-    glib::{self, Object},
-    prelude::{Cast, PaintableExt},
-    subclass::prelude::ObjectSubclass,
-};
+use gtk::{gdk, prelude::Cast};
 use wgpu::TextureFormat;
 use wgpu_hal::{vulkan, Instance};
 
-use crate::{hal_custom, AdwaitaPlugin, DmabufInfo};
+use crate::{hal_custom, DmabufInfo};
 
-impl AdwaitaPlugin {
-    #[must_use]
-    pub fn render_plugin() -> RenderPlugin {
-        let render_creation = create_renderer();
-        RenderPlugin {
-            render_creation,
-            synchronous_pipeline_compilation: false,
-        }
-    }
-}
-
-fn create_renderer() -> RenderCreation {
-    let settings = WgpuSettings::default();
-
+pub fn create_renderer(settings: WgpuSettings) -> RenderCreation {
     let do_async = async move {
         let instance = unsafe {
             vulkan::Instance::init(&wgpu_hal::InstanceDescriptor {

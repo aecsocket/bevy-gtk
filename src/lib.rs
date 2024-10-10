@@ -2,8 +2,7 @@ mod hal_custom;
 mod render;
 
 use std::{
-    borrow::Borrow,
-    cell::Cell,
+    any::type_name,
     num::NonZero,
     sync::{
         atomic::{AtomicI32, Ordering},
@@ -21,37 +20,63 @@ use bevy::{
         camera::{ManualTextureViewHandle, ManualTextureViews, RenderTarget},
         render_resource::TextureView,
         renderer::RenderDevice,
-        Extract, Render, RenderApp, RenderSet,
+        settings::WgpuSettings,
+        Extract, Render, RenderApp, RenderPlugin, RenderSet,
     },
-    window::WindowRef,
+    window::{ExitCondition, WindowRef},
 };
 use gtk::glib;
 use sync_wrapper::SyncWrapper;
 
 #[derive(Debug)]
-pub struct AdwaitaPlugin;
+pub struct AdwaitaPlugin {
+    pub primary_window: Option<AdwaitaWindowConfig>,
+}
 
 impl AdwaitaPlugin {
     #[must_use]
     pub fn window_plugin() -> WindowPlugin {
-        WindowPlugin::default()
-        // WindowPlugin {
-        //     primary_window: None,
-        //     exit_condition: ExitCondition::DontExit,
-        //     close_when_requested: false,
-        // }
+        WindowPlugin {
+            primary_window: None,
+            exit_condition: ExitCondition::DontExit,
+            close_when_requested: false,
+        }
+    }
+
+    #[must_use]
+    pub fn render_plugin(settings: WgpuSettings) -> RenderPlugin {
+        let render_creation = render::create_renderer(settings);
+        RenderPlugin {
+            render_creation,
+            synchronous_pipeline_compilation: false,
+        }
     }
 }
 
 impl Plugin for AdwaitaPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(PreUpdate, update_frame_size)
-            .observe(change_default_render_target);
+            .observe(change_camera_default_render_target)
+            .observe(update_existing_camera_default_render_targets);
+
         let render_app = app.sub_app_mut(RenderApp);
         render_app
             .add_systems(ExtractSchedule, extract_windows)
             .add_systems(Render, update_dmabufs.after(RenderSet::Render));
+
+        if let Some(config) = self.primary_window.clone() {
+            app.add_systems(Startup, spawn_primary_window_system(config));
+        }
     }
+}
+
+fn spawn_primary_window_system(config: AdwaitaWindowConfig) -> impl IntoSystem<(), (), ()> {
+    IntoSystem::into_system(move |mut commands: Commands| {
+        commands
+            .spawn_empty()
+            .add(AdwaitaWindow::open(config.clone()))
+            .insert(PrimaryAdwaitaWindow);
+    })
 }
 
 // How does the texture creation work?
@@ -68,10 +93,10 @@ impl Plugin for AdwaitaPlugin {
 // - Window holds on to the render target texture as well, replacing any old one it had
 //   - If it had an old one, now it will be dropped
 
-// Working notes:
-// - Works fine at 512, 1280
-// - Works fine at 1152, 1216, 1344
-//   - Multiples of 64
+#[derive(Debug, Clone)]
+pub struct AdwaitaWindowConfig {
+    pub app_id: String,
+}
 
 #[derive(Debug, Component)]
 pub struct AdwaitaWindow {
@@ -98,13 +123,12 @@ pub struct PrimaryAdwaitaWindow;
 
 impl AdwaitaWindow {
     #[must_use]
-    pub fn open(app_id: impl Into<String>) -> impl EntityCommand {
-        let application_id = app_id.into();
+    pub fn open(config: AdwaitaWindowConfig) -> impl EntityCommand {
         move |entity: Entity, world: &mut World| {
             open(
                 entity,
                 world,
-                application_id,
+                config,
                 NonZero::new(1177).unwrap(),
                 NonZero::new(720).unwrap(),
             )
@@ -128,7 +152,7 @@ impl AdwaitaWindow {
 fn open(
     entity: Entity,
     world: &mut World,
-    app_id: String,
+    config: AdwaitaWindowConfig,
     width: NonZero<u32>,
     height: NonZero<u32>,
 ) {
@@ -157,7 +181,7 @@ fn open(
         let (frame_width, frame_height) = (frame_width.clone(), frame_height.clone());
         move || {
             run(
-                app_id,
+                config.app_id,
                 shared_draw_info,
                 frame_width,
                 frame_height,
@@ -334,7 +358,7 @@ fn update_frame_size(
             continue;
         }
         window.last_frame_size = Some(size);
-        info!("Updating render target size to {width}x{height}");
+        trace!("Updating render target size to {width}x{height}");
 
         let (new_texture_view, dmabuf_fd) =
             render::setup_render_target(size, render_device.as_ref());
@@ -394,20 +418,41 @@ fn update_dmabufs(mut windows: Query<&mut RenderWindow>) {
     }
 }
 
-fn change_default_render_target(
+fn change_camera_default_render_target(
     trigger: Trigger<OnInsert, Camera>,
     mut cameras: Query<&mut Camera>,
-    primary_window: Query<&AdwaitaWindow, With<PrimaryAdwaitaWindow>>,
+    primary_windows: Query<&AdwaitaWindow, With<PrimaryAdwaitaWindow>>,
 ) {
-    let Ok(primary_window) = primary_window.get_single() else {
+    let Ok(primary_window) = primary_windows.get_single() else {
         return;
     };
 
     let entity = trigger.entity();
     let mut camera = cameras
         .get_mut(entity)
-        .expect("we are adding this component to this entity");
+        .expect("we are inserting this component into this entity");
     if matches!(camera.target, RenderTarget::Window(WindowRef::Primary)) {
         camera.target = primary_window.render_target();
+    }
+}
+
+fn update_existing_camera_default_render_targets(
+    trigger: Trigger<OnInsert, PrimaryAdwaitaWindow>,
+    windows: Query<&AdwaitaWindow>,
+    mut cameras: Query<&mut Camera>,
+) {
+    let entity = trigger.entity();
+    let window = windows.get(entity).unwrap_or_else(|_| {
+        panic!(
+            "entity with `{}` should have `{}`",
+            type_name::<PrimaryAdwaitaWindow>(),
+            type_name::<AdwaitaWindow>()
+        );
+    });
+
+    for mut camera in &mut cameras {
+        if matches!(camera.target, RenderTarget::Window(WindowRef::Primary)) {
+            camera.target = window.render_target();
+        }
     }
 }

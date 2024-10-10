@@ -1,27 +1,25 @@
 use bevy::{
     prelude::*,
-    render::camera::RenderTarget,
+    render::{camera::RenderTarget, settings::WgpuSettings},
     window::{PrimaryWindow, WindowRef},
 };
-use bevy_mod_adwaita::{AdwaitaPlugin, AdwaitaWindow, PrimaryAdwaitaWindow};
+use bevy_mod_adwaita::{AdwaitaPlugin, AdwaitaWindowConfig};
 
 fn main() -> AppExit {
     App::new()
         .add_plugins((
             DefaultPlugins
-                .set(AdwaitaPlugin::window_plugin())
-                .set(AdwaitaPlugin::render_plugin()),
-            AdwaitaPlugin,
+                // .set(AdwaitaPlugin::window_plugin())
+                .set(AdwaitaPlugin::render_plugin(WgpuSettings::default())),
+            AdwaitaPlugin {
+                primary_window: Some(AdwaitaWindowConfig {
+                    app_id: "io.github.aecsocket.bevy_mod_adwaita".into(),
+                }),
+            },
         ))
-        .add_systems(Startup, (spawn_adwaita_window, setup_scene).chain())
+        .add_systems(PreStartup, setup_scene)
         .add_systems(Update, rotate_cube)
         .run()
-}
-
-fn spawn_adwaita_window(mut commands: Commands) {
-    commands
-        .spawn(PrimaryAdwaitaWindow)
-        .add(AdwaitaWindow::open("io.github.aecsocket.bevy_mod_adwaita"));
 }
 
 #[derive(Debug, Component)]
