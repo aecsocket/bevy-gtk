@@ -14,6 +14,7 @@ pub struct WindowOpen {
     pub recv_command: flume::Receiver<WindowCommand>,
     pub render_target_width: Arc<AtomicI32>,
     pub render_target_height: Arc<AtomicI32>,
+    pub scale_factor: Arc<AtomicI32>,
     pub shared_next_frame: Arc<AtomicOptionBox<FrameInfo>>,
     pub closed: Arc<AtomicBool>,
 }
@@ -63,6 +64,7 @@ impl WindowState {
             recv_command,
             render_target_width,
             render_target_height,
+            scale_factor,
             shared_next_frame,
             closed,
         } = request;
@@ -91,7 +93,7 @@ impl WindowState {
             let width_listener = gtk::DrawingArea::builder().hexpand(true).build();
             width_listener.set_draw_func({
                 let render_target_width = render_target_width.clone();
-                move |_, _, width, _| {
+                move |area, _, width, _| {
                     render_target_width.store(width, Ordering::SeqCst);
                 }
             });
@@ -99,7 +101,7 @@ impl WindowState {
             let height_listener = gtk::DrawingArea::builder().vexpand(true).build();
             height_listener.set_draw_func({
                 let render_target_height = render_target_height.clone();
-                move |_, _, _, height| {
+                move |area, _, _, height| {
                     render_target_height.store(height, Ordering::SeqCst);
                 }
             });
@@ -162,6 +164,13 @@ impl WindowState {
             move |_| {
                 closed.store(true, Ordering::SeqCst);
                 glib::Propagation::Proceed
+            }
+        });
+
+        window.connect_scale_factor_notify({
+            let scale_factor = scale_factor.clone();
+            move |window| {
+                scale_factor.store(window.scale_factor(), Ordering::SeqCst);
             }
         });
 

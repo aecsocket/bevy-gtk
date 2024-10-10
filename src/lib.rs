@@ -100,6 +100,7 @@ pub struct AdwaitaWindow {
     send_command: flume::Sender<WindowCommand>,
     render_target_width: Arc<AtomicI32>,
     render_target_height: Arc<AtomicI32>,
+    scale_factor: Arc<AtomicI32>,
     shared_next_frame: Arc<AtomicOptionBox<FrameInfo>>,
     closed: Arc<AtomicBool>,
     render_target_handle: ManualTextureViewHandle,
@@ -163,6 +164,7 @@ impl AdwaitaWindow {
             let (send_command, recv_command) = flume::bounded::<WindowCommand>(16);
             let render_target_width = Arc::new(AtomicI32::new(-1));
             let render_target_height = Arc::new(AtomicI32::new(-1));
+            let scale_factor = Arc::new(AtomicI32::new(-1));
             let shared_next_frame = Arc::new(AtomicOptionBox::<FrameInfo>::none());
             let closed = Arc::new(AtomicBool::new(false));
             let request = WindowOpen {
@@ -171,6 +173,7 @@ impl AdwaitaWindow {
                 render_target_width: render_target_width.clone(),
                 render_target_height: render_target_height.clone(),
                 shared_next_frame: shared_next_frame.clone(),
+                scale_factor: scale_factor.clone(),
                 closed: closed.clone(),
             };
 
@@ -186,6 +189,7 @@ impl AdwaitaWindow {
                 send_command,
                 render_target_width,
                 render_target_height,
+                scale_factor,
                 shared_next_frame,
                 closed,
                 render_target_handle,
@@ -284,19 +288,20 @@ fn poll_windows(
             continue;
         }
 
-        let (width, height) = (
+        let (width, height, scale_factor) = (
             window.render_target_width.load(Ordering::SeqCst),
             window.render_target_height.load(Ordering::SeqCst),
+            window.scale_factor.load(Ordering::SeqCst),
         );
-        let (Ok(width), Ok(height)) = (u32::try_from(width), u32::try_from(height)) else {
+        let (Ok(width), Ok(height), Ok(scale_factor)) = (
+            u32::try_from(width),
+            u32::try_from(height),
+            u32::try_from(scale_factor),
+        ) else {
             continue;
         };
 
-        let size = UVec2::new(
-            width.max(1),
-            // (width / WIDTH_MULTIPLE).max(1) * WIDTH_MULTIPLE,
-            height.max(1),
-        );
+        let size = UVec2::new(width.max(1) * scale_factor, height.max(1) * scale_factor);
         if size == window.last_render_target_size {
             continue;
         }
