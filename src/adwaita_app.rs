@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::Arc;
 
 use adw::prelude::*;
-use adw::{gio, glib, gtk};
+use adw::{glib, gtk};
 use atomicbox::AtomicOptionBox;
 
 use crate::render::{self, FrameInfo};
@@ -20,7 +20,11 @@ pub struct WindowOpen {
 }
 
 #[derive(Debug)]
-pub enum WindowCommand {}
+pub enum WindowCommand {
+    SetMaximized(bool),
+    SetFullscreen(bool),
+    SetTitle(String),
+}
 
 pub fn main_thread_loop(recv_window_open: flume::Receiver<WindowOpen>) {
     // when we `init`, this thread is marked as the main thread
@@ -93,7 +97,7 @@ impl WindowState {
             let width_listener = gtk::DrawingArea::builder().hexpand(true).build();
             width_listener.set_draw_func({
                 let render_target_width = render_target_width.clone();
-                move |area, _, width, _| {
+                move |_, _, width, _| {
                     render_target_width.store(width, Ordering::SeqCst);
                 }
             });
@@ -101,7 +105,7 @@ impl WindowState {
             let height_listener = gtk::DrawingArea::builder().vexpand(true).build();
             height_listener.set_draw_func({
                 let render_target_height = render_target_height.clone();
-                move |area, _, _, height| {
+                move |_, _, _, height| {
                     render_target_height.store(height, Ordering::SeqCst);
                 }
             });
@@ -226,6 +230,24 @@ impl WindowState {
                 Err(flume::TryRecvError::Disconnected) => return Err(()),
                 Err(flume::TryRecvError::Empty) => break,
             };
+
+            match command {
+                WindowCommand::SetMaximized(true) => {
+                    self.window.maximize();
+                }
+                WindowCommand::SetMaximized(false) => {
+                    self.window.unmaximize();
+                }
+                WindowCommand::SetFullscreen(true) => {
+                    self.window.fullscreen();
+                }
+                WindowCommand::SetFullscreen(false) => {
+                    self.window.unfullscreen();
+                }
+                WindowCommand::SetTitle(title) => {
+                    self.window.set_title(Some(&title));
+                }
+            }
         }
 
         Ok(())

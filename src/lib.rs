@@ -213,6 +213,39 @@ impl AdwaitaWindow {
     pub const fn render_target(&self) -> RenderTarget {
         RenderTarget::TextureView(self.render_target_handle)
     }
+
+    pub fn set_maximized(&self, maximized: bool) {
+        _ = self
+            .send_command
+            .send(WindowCommand::SetMaximized(maximized));
+    }
+
+    pub fn maximize(&self) {
+        self.set_maximized(true);
+    }
+
+    pub fn unmaximize(&self) {
+        self.set_maximized(false);
+    }
+
+    pub fn set_fullscreen(&self, fullscreen: bool) {
+        _ = self
+            .send_command
+            .send(WindowCommand::SetFullscreen(fullscreen));
+    }
+
+    pub fn fullscreen(&self) {
+        self.set_fullscreen(true);
+    }
+
+    pub fn unfullscreen(&self) {
+        self.set_fullscreen(false);
+    }
+
+    pub fn set_title(&self, title: impl Into<String>) {
+        let title = title.into();
+        _ = self.send_command.send(WindowCommand::SetTitle(title));
+    }
 }
 
 fn update_default_camera_render_target(
@@ -320,7 +353,7 @@ fn poll_windows(
                 size,
                 fd: dmabuf_fd,
             },
-            texture_view,
+            _texture_view: texture_view,
         };
         info!("Stored next frame info {next_frame_info:?}");
         window

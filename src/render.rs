@@ -32,7 +32,9 @@ pub struct DmabufInfo {
 #[derive(Debug)]
 pub struct FrameInfo {
     pub dmabuf: DmabufInfo,
-    pub texture_view: TextureView,
+    // just keep this around so that we own the view while we're drawing it
+    // as soon as we drop this, the GPU image + texture + dmabuf is freed
+    pub _texture_view: TextureView,
 }
 
 pub fn create_renderer(settings: WgpuSettings) -> RenderCreation {
