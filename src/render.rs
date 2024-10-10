@@ -276,8 +276,6 @@ fn create_target_from_hal(
 }
 
 pub fn create_dmabuf_texture(info: &DmabufInfo) -> gdk::Paintable {
-    const WIDTH_MULTIPLE: u32 = 64;
-
     let &DmabufInfo { size, fd } = info;
 
     // https://docs.gtk.org/gdk4/class.DmabufTextureBuilder.html
@@ -291,7 +289,10 @@ pub fn create_dmabuf_texture(info: &DmabufInfo) -> gdk::Paintable {
     builder.set_n_planes(1);
     builder.set_fd(0, fd);
     builder.set_offset(0, 0);
-    builder.set_stride(0, size.x * 4); // bytes per row
+
+    // what the fuck?
+    const VAL: u32 = 64;
+    builder.set_stride(0, (size.x / VAL) * VAL * 4); // bytes per row
 
     unsafe { builder.build() }
         .expect("should be a valid dmabuf texture")

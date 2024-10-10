@@ -52,6 +52,7 @@ struct WindowState {
     shared_next_frame: Arc<AtomicOptionBox<FrameInfo>>,
     recv_command: flume::Receiver<WindowCommand>,
     closed: Arc<AtomicBool>,
+    should_poll: Arc<AtomicBool>,
     current_frame: Option<FrameInfo>,
 }
 
@@ -164,6 +165,15 @@ impl WindowState {
             }
         });
 
+        let should_poll = Arc::new(AtomicBool::new(false));
+        window.add_tick_callback({
+            let should_poll = should_poll.clone();
+            move |_, _| {
+                should_poll.store(true, Ordering::SeqCst);
+                glib::ControlFlow::Continue
+            }
+        });
+
         window.present();
 
         Self {
@@ -172,11 +182,19 @@ impl WindowState {
             shared_next_frame,
             recv_command,
             closed,
+            should_poll,
             current_frame: None,
         }
     }
 
     fn poll(&mut self) -> Result<(), ()> {
+        let Ok(true) =
+            self.should_poll
+                .compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst)
+        else {
+            return Ok(());
+        };
+
         if self.closed.load(Ordering::SeqCst) {
             return Err(());
         }

@@ -310,16 +310,17 @@ fn poll_windows(
         // the GPU resources won't be deallocated until the window *also* drops it
         let texture_view = manual_texture_view.texture_view.clone();
         manual_texture_views.insert(window.render_target_handle.clone(), manual_texture_view);
-        window.next_frame_info.store(
-            Some(Box::new(FrameInfo {
-                dmabuf: DmabufInfo {
-                    size,
-                    fd: dmabuf_fd,
-                },
-                texture_view,
-            })),
-            Ordering::SeqCst,
-        );
+        let next_frame_info = FrameInfo {
+            dmabuf: DmabufInfo {
+                size,
+                fd: dmabuf_fd,
+            },
+            texture_view,
+        };
+        info!("Stored next frame info {next_frame_info:?}");
+        window
+            .next_frame_info
+            .store(Some(Box::new(next_frame_info)), Ordering::SeqCst);
     }
 }
 
@@ -334,6 +335,7 @@ fn extract_windows(mut commands: Commands, windows: Extract<Query<&AdwaitaWindow
         let Some(next_frame_info) = window.next_frame_info.take(Ordering::SeqCst) else {
             continue;
         };
+        info!("--extract: Got next frame info {next_frame_info:?}");
 
         commands.spawn(RenderWindow {
             shared_next_frame: window.shared_next_frame.clone(),
@@ -348,6 +350,7 @@ fn send_frame_info_to_windows(mut windows: Query<&mut RenderWindow>) {
             continue;
         };
 
+        info!("Sending next frame {next_frame_info:?} now.");
         window
             .shared_next_frame
             .store(Some(Box::new(next_frame_info)), Ordering::SeqCst);
