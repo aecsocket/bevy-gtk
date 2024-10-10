@@ -28,7 +28,7 @@ rand = "0.8.5"
 [dependencies.adw]
 package = "libadwaita"
 version = "0.7.0"
-features = ["v1_2"]
+features = ["v1_2", "gtk_v4_2"]
 
 [dependencies.gtk]
 package = "gtk4"

@@ -9,6 +9,7 @@ use bevy::{
     prelude::*,
     render::{
         camera::ManualTextureView,
+        render_resource::TextureView,
         renderer::{
             RenderAdapter, RenderAdapterInfo, RenderDevice, RenderInstance, RenderQueue,
             WgpuWrapper,
@@ -20,7 +21,19 @@ use gtk::{gdk, prelude::Cast};
 use wgpu::TextureFormat;
 use wgpu_hal::{vulkan, Instance};
 
-use crate::{hal_custom, DmabufInfo};
+use crate::hal_custom;
+
+#[derive(Debug)]
+pub struct DmabufInfo {
+    pub size: UVec2,
+    pub fd: i32,
+}
+
+#[derive(Debug)]
+pub struct FrameInfo {
+    pub dmabuf: DmabufInfo,
+    pub texture_view: TextureView,
+}
 
 pub fn create_renderer(settings: WgpuSettings) -> RenderCreation {
     let do_async = async move {
@@ -262,7 +275,7 @@ fn create_target_from_hal(
     (texture, dmabuf_fd)
 }
 
-pub fn build_dmabuf_texture(info: &DmabufInfo) -> gdk::Paintable {
+pub fn create_dmabuf_texture(info: &DmabufInfo) -> gdk::Paintable {
     let &DmabufInfo { size, fd } = info;
 
     // https://docs.gtk.org/gdk4/class.DmabufTextureBuilder.html

@@ -3,17 +3,18 @@ use bevy::{
     render::{camera::RenderTarget, settings::WgpuSettings},
     window::{PrimaryWindow, WindowRef},
 };
-use bevy_mod_adwaita::{AdwaitaPlugin, AdwaitaWindowConfig};
+use bevy_mod_adwaita::{AdwaitaHeaderBar, AdwaitaWindowConfig, AdwaitaWindowPlugin};
 
 fn main() -> AppExit {
     App::new()
         .add_plugins((
             DefaultPlugins
                 // .set(AdwaitaPlugin::window_plugin())
-                .set(AdwaitaPlugin::render_plugin(WgpuSettings::default())),
-            AdwaitaPlugin {
-                primary_window: Some(AdwaitaWindowConfig {
-                    app_id: "io.github.aecsocket.bevy_mod_adwaita".into(),
+                .set(AdwaitaWindowPlugin::render_plugin(WgpuSettings::default())),
+            AdwaitaWindowPlugin {
+                primary_window_config: Some(AdwaitaWindowConfig {
+                    header_bar: AdwaitaHeaderBar::OverContent,
+                    ..default()
                 }),
             },
         ))
@@ -60,14 +61,6 @@ fn setup_scene(
     });
     // camera
     commands.spawn(Camera3dBundle {
-        transform: Transform::from_xyz(-2.5, 4.5, 9.0).looking_at(Vec3::ZERO, Vec3::Y),
-        ..default()
-    });
-    commands.spawn(Camera3dBundle {
-        camera: Camera {
-            target: RenderTarget::Window(WindowRef::Entity(primary_window.single())),
-            ..default()
-        },
         transform: Transform::from_xyz(-2.5, 4.5, 9.0).looking_at(Vec3::ZERO, Vec3::Y),
         ..default()
     });
