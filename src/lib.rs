@@ -64,7 +64,8 @@ impl Plugin for AdwaitaWindowPlugin {
         let render_app = app.sub_app_mut(RenderApp);
         render_app
             .add_systems(ExtractSchedule, extract_windows)
-            .add_systems(Render, send_frame_info_to_windows.after(RenderSet::Render));
+            .add_systems(Render, send_frame_to_windows.after(RenderSet::Render))
+            .add_systems(Last, put_back_next_frame_if_not_sent);
 
         if let Some(config) = self.primary_window_config.clone() {
             let world = app.world_mut();
@@ -105,9 +106,7 @@ pub struct AdwaitaWindow {
     closed: Arc<AtomicBool>,
     render_target_handle: ManualTextureViewHandle,
     last_render_target_size: UVec2,
-    // use an `AtomicOptionBox` instead of `Option` because we only have a shared ref
-    // during extract, and we want to `take` there
-    next_frame_info: AtomicOptionBox<FrameInfo>,
+    next_frame_to_render: Arc<AtomicOptionBox<FrameInfo>>,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Component, Reflect)]
@@ -194,7 +193,7 @@ impl AdwaitaWindow {
                 closed,
                 render_target_handle,
                 last_render_target_size: UVec2::new(0, 0),
-                next_frame_info: AtomicOptionBox::none(),
+                next_frame_to_render: Arc::new(AtomicOptionBox::none()),
             });
             world
                 .resource::<SendWindowOpen>()
@@ -357,7 +356,7 @@ fn poll_windows(
         };
         info!("Stored next frame info {next_frame_info:?}");
         window
-            .next_frame_info
+            .next_frame_to_render
             .store(Some(Box::new(next_frame_info)), Ordering::SeqCst);
     }
 }
@@ -365,32 +364,58 @@ fn poll_windows(
 #[derive(Debug, Component)]
 struct RenderWindow {
     shared_next_frame: Arc<AtomicOptionBox<FrameInfo>>,
-    next_frame_info: Option<FrameInfo>,
+    next_frame_to_render: Arc<AtomicOptionBox<FrameInfo>>,
+    next_frame_to_send: Option<Box<FrameInfo>>,
 }
 
 fn extract_windows(mut commands: Commands, windows: Extract<Query<&AdwaitaWindow>>) {
+    info!("-- RUNNING extract_windows");
     for window in &windows {
-        let Some(next_frame_info) = window.next_frame_info.take(Ordering::SeqCst) else {
+        let Some(next_frame_to_send) = window.next_frame_to_render.take(Ordering::SeqCst) else {
             continue;
         };
-        info!("--extract: Got next frame info {next_frame_info:?}");
+        info!("--extract: Got next frame info {next_frame_to_send:?}");
 
         commands.spawn(RenderWindow {
             shared_next_frame: window.shared_next_frame.clone(),
-            next_frame_info: Some(*next_frame_info),
+            next_frame_to_render: window.next_frame_to_render.clone(),
+            next_frame_to_send: Some(next_frame_to_send),
         });
     }
 }
 
-fn send_frame_info_to_windows(mut windows: Query<&mut RenderWindow>) {
+fn send_frame_to_windows(mut windows: Query<&mut RenderWindow>) {
+    info!("-- RUNNING send_frame_info_to_windows");
     for mut window in &mut windows {
-        let Some(next_frame_info) = window.next_frame_info.take() else {
+        let Some(next_frame_info) = window.next_frame_to_send.take() else {
             continue;
         };
 
         info!("Sending next frame {next_frame_info:?} now.");
         window
             .shared_next_frame
-            .store(Some(Box::new(next_frame_info)), Ordering::SeqCst);
+            .store(Some(next_frame_info), Ordering::SeqCst);
     }
 }
+
+fn put_back_next_frame_if_not_sent(mut windows: Query<&mut RenderWindow>) {
+    for mut window in &mut windows {
+        if let Some(frame_info) = window.next_frame_to_send.take() {
+            window
+                .next_frame_to_render
+                .store(Some(frame_info), Ordering::SeqCst);
+        }
+    }
+}
+
+//
+//            | set `next_to_render`            | set `next_to_render`
+//            v                     extract     v
+// update  ---+-------------------|---------|---+--------------|---
+// render                         |-+-------|--------------+-+-|---
+//                                  ^                      ^ ^
+//            take `next_to_render` |                      | | in `Last`:
+//          store in `next_to_send` |                      | | if we still have a `next_to_send`,
+//                                                         | | put it back
+//                                 after RenderSet::Render |
+//                            take and send `next_to_send` |
