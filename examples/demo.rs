@@ -54,6 +54,18 @@ fn main() -> AppExit {
     };
     app.add_systems(Startup, setup)
         .add_systems(Update, rotate_cube)
+        .add_systems(Update, |t: Res<Time>, mut windows: Query<&mut Window>| {
+            let p = t.elapsed_secs() % 2.0;
+            if p < 1.0 {
+                windows
+                    .iter_mut()
+                    .for_each(|mut w| w.titlebar_transparent = false);
+            } else {
+                windows
+                    .iter_mut()
+                    .for_each(|mut w| w.titlebar_transparent = true);
+            }
+        })
         .run()
 }
 

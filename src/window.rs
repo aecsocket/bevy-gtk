@@ -20,6 +20,10 @@ pub struct GtkWindows {
 pub struct WindowProxy {
     pub gtk: gtk::ApplicationWindow,
     content: gtk::Widget,
+    cache_titlebar_shown: bool,
+    cache_titlebar_transparent: bool,
+    cache_titlebar_show_title: bool,
+    cache_titlebar_show_buttons: bool,
     rx_close_request: async_channel::Receiver<()>,
 }
 
@@ -81,7 +85,6 @@ impl GtkWindows {
 }
 
 pub fn create_bevy_to_gtk(
-    mut commands: Commands,
     new_windows: Query<(Entity, &mut Window), Added<Window>>,
     mut gtk_windows: NonSendMut<GtkWindows>,
     gtk_app: NonSend<GtkApplication>,
@@ -115,6 +118,11 @@ pub fn create_bevy_to_gtk(
         let mut proxy = WindowProxy {
             gtk: gtk_window,
             content: gtk::Label::new(None).upcast(),
+            // negate cache values to force a widget tree rebuild
+            cache_titlebar_shown: !bevy_window.titlebar_shown,
+            cache_titlebar_transparent: !bevy_window.titlebar_transparent,
+            cache_titlebar_show_title: !bevy_window.titlebar_show_title,
+            cache_titlebar_show_buttons: !bevy_window.titlebar_show_buttons,
             rx_close_request,
         };
         sync_one(gtk_windows.use_adw, bevy_window, &mut proxy);
@@ -140,63 +148,84 @@ pub fn sync_bevy_to_gtk(
 }
 
 fn sync_one(use_adw: bool, bevy_window: &Window, proxy: &mut WindowProxy) {
+    fn cmp_ex(dst: &mut bool, src: bool) -> bool {
+        if *dst == src {
+            false
+        } else {
+            *dst = src;
+
+            true
+        }
+    }
+
     proxy.gtk.set_title(Some(&bevy_window.title));
 
-    if_adw!(
-        use_adw,
-        if let Some(window) = proxy.gtk.downcast_ref::<adw::ApplicationWindow>() {
-            use adw::prelude::*;
+    let rebuild_widgets = cmp_ex(&mut proxy.cache_titlebar_shown, bevy_window.titlebar_shown)
+        || cmp_ex(
+            &mut proxy.cache_titlebar_transparent,
+            bevy_window.titlebar_transparent,
+        )
+        || cmp_ex(
+            &mut proxy.cache_titlebar_show_title,
+            bevy_window.titlebar_show_title,
+        )
+        || cmp_ex(
+            &mut proxy.cache_titlebar_show_buttons,
+            bevy_window.titlebar_show_buttons,
+        );
+    if rebuild_widgets {
+        if_adw!(
+            use_adw,
+            if let Some(window) = proxy.gtk.downcast_ref::<adw::ApplicationWindow>() {
+                use adw::prelude::*;
 
-            // ensure `proxy.content` has no parent before we add it to a new parent
-            replace_content(&proxy.content, None);
-            if bevy_window.titlebar_shown {
-                if bevy_window.titlebar_transparent {
-                    if bevy_window.titlebar_show_buttons {
-                        // same margin as `adw::HeaderBar`
-                        const MARGIN: i32 = 6;
+                // ensure `proxy.content` has no parent before we add it to a new parent
+                replace_content(&proxy.content, None);
+                if bevy_window.titlebar_shown {
+                    if bevy_window.titlebar_transparent {
+                        if bevy_window.titlebar_show_buttons {
+                            // same margin as `adw::HeaderBar`
+                            const MARGIN: i32 = 6;
 
-                        let window_controls = gtk::WindowControls::builder()
-                            .side(gtk::PackType::End)
-                            .halign(gtk::Align::End)
-                            .valign(gtk::Align::Start)
-                            .margin_start(MARGIN)
-                            .margin_end(MARGIN)
-                            .margin_top(MARGIN)
-                            .margin_bottom(MARGIN)
-                            .build();
+                            let window_controls = gtk::WindowControls::builder()
+                                .side(gtk::PackType::End)
+                                .halign(gtk::Align::End)
+                                .valign(gtk::Align::Start)
+                                .margin_start(MARGIN)
+                                .margin_end(MARGIN)
+                                .margin_top(MARGIN)
+                                .margin_bottom(MARGIN)
+                                .build();
 
-                        let overlay = gtk::Overlay::new();
-                        overlay.add_overlay(&window_controls);
-                        overlay.set_child(Some(&proxy.content));
-                        window.set_content(Some(&overlay));
+                            let overlay = gtk::Overlay::new();
+                            overlay.add_overlay(&window_controls);
+                            overlay.set_child(Some(&proxy.content));
+                            window.set_content(Some(&overlay));
+                        } else {
+                            window.set_content(Some(&proxy.content));
+                        }
                     } else {
-                        window.set_content(Some(&proxy.content));
+                        let header = adw::HeaderBar::new();
+                        if !bevy_window.titlebar_show_title {
+                            header.set_title_widget(Some(&gtk::Label::new(None)));
+                        }
+                        if !bevy_window.titlebar_show_buttons {
+                            header.set_show_start_title_buttons(false);
+                            header.set_show_end_title_buttons(false);
+                        }
+
+                        let toolbar = adw::ToolbarView::new();
+                        toolbar.add_top_bar(&header);
+                        toolbar.set_content(Some(&proxy.content));
+                        window.set_content(Some(&toolbar));
                     }
                 } else {
-                    let header = adw::HeaderBar::new();
-                    if !bevy_window.titlebar_show_title {
-                        // TODO generic empty widget
-                        header.set_title_widget(Some(&gtk::Box::new(
-                            gtk::Orientation::Horizontal,
-                            0,
-                        )));
-                    }
-                    if !bevy_window.titlebar_show_buttons {
-                        header.set_show_start_title_buttons(false);
-                        header.set_show_end_title_buttons(false);
-                    }
-
-                    let toolbar = adw::ToolbarView::new();
-                    toolbar.add_top_bar(&header);
-                    toolbar.set_content(Some(&proxy.content));
-                    window.set_content(Some(&toolbar));
-                }
-            } else {
-                window.set_content(Some(&proxy.content));
-            };
-        },
-        proxy.gtk.set_child(Some(&proxy.content)),
-    );
+                    window.set_content(Some(&proxy.content));
+                };
+            },
+            proxy.gtk.set_child(Some(&proxy.content)),
+        );
+    }
 }
 
 pub fn sync_gtk_to_bevy(
