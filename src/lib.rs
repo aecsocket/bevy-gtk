@@ -1,30 +1,192 @@
-mod adwaita_app;
+extern crate gdk4 as gdk;
+extern crate gio;
+extern crate gtk4 as gtk;
+#[cfg(feature = "adwaita")]
+extern crate libadwaita as adw;
+
+macro_rules! if_adw {
+    ($with_adw:expr, $without_adw:expr $(,)?) => {{
+        #[cfg(feature = "adwaita")]
+        {
+            $with_adw
+        }
+        #[cfg(not(feature = "adwaita"))]
+        {
+            $without_adw
+        }
+    }};
+    ($is_adw:expr, $with_adw:expr, $without_adw:expr $(,)?) => {{
+        #[cfg(feature = "adwaita")]
+        {
+            if $is_adw { $with_adw } else { $without_adw }
+        }
+        #[cfg(not(feature = "adwaita"))]
+        {
+            $without_adw
+        }
+    }};
+}
+
+mod window;
+
+pub use window::GtkWindows;
+use {
+    bevy_app::{PluginsState, prelude::*},
+    bevy_derive::Deref,
+    bevy_ecs::prelude::*,
+    glib::clone,
+    gtk::prelude::*,
+    log::trace,
+    std::{
+        cell::{Cell, RefCell},
+        rc::Rc,
+    },
+};
+
+#[derive(Default)]
+pub struct GtkPlugin {
+    pub use_adw: bool,
+    pub app_id: Option<String>,
+    pub app_flags: gio::ApplicationFlags,
+}
+
+#[derive(Debug, Clone, Deref)]
+pub struct GtkApplication(pub gtk::Application);
+
+impl GtkPlugin {
+    pub fn new(app_id: impl Into<String>) -> Self {
+        Self {
+            use_adw: if_adw!(true, false),
+            app_id: Some(app_id.into()),
+            app_flags: gio::ApplicationFlags::empty(),
+        }
+    }
+
+    pub fn with_adw(self) -> Self {
+        Self {
+            use_adw: true,
+            ..self
+        }
+    }
+
+    pub fn without_adw(self) -> Self {
+        Self {
+            use_adw: false,
+            ..self
+        }
+    }
+}
+
+impl Plugin for GtkPlugin {
+    fn build(&self, app: &mut App) {
+        let gtk_app = if_adw!(
+            self.use_adw,
+            adw::Application::new(self.app_id.as_deref(), self.app_flags)
+                .upcast::<gtk::Application>(),
+            gtk::Application::new(self.app_id.as_deref(), self.app_flags),
+        );
+
+        app.insert_non_send_resource(GtkApplication(gtk_app.clone()))
+            .insert_non_send_resource(GtkWindows::new(self.use_adw))
+            .set_runner(|bevy_app| gtk_runner(bevy_app, gtk_app))
+            .add_systems(
+                Last,
+                (
+                    window::create_bevy_to_gtk,
+                    window::despawn,
+                    window::sync_bevy_to_gtk,
+                    window::sync_gtk_to_bevy,
+                )
+                    .chain(),
+            );
+    }
+}
+
+fn gtk_runner(mut bevy_app: App, gtk_app: gtk::Application) -> AppExit {
+    if bevy_app.plugins_state() == PluginsState::Ready {
+        bevy_app.finish();
+        bevy_app.cleanup();
+    }
+
+    trace!("Starting GTK app");
+
+    // prevent app closing when there are no windows;
+    // this is `bevy_window`'s responsibility
+    // let _app_hold = gtk_app.hold();
+
+    let bevy_app = Rc::new(RefCell::new(Some(bevy_app)));
+    let bevy_exit = Rc::new(Cell::new(None::<AppExit>));
+    gtk_app.connect_activate(clone!(
+        #[strong]
+        bevy_app,
+        #[strong]
+        bevy_exit,
+        move |_| {
+            let Some(mut bevy_app) = bevy_app.take() else {
+                return;
+            };
+
+            // do one update first to spawn initial windows now
+            // otherwise Gio complains about spawning windows before `startup`
+            bevy_app.update();
+            glib::idle_add_local(clone!(
+                #[strong]
+                bevy_exit,
+                move || {
+                    if let Some(exit) = idle_update(&mut bevy_app) {
+                        bevy_exit.set(Some(exit));
+                        glib::ControlFlow::Break
+                    } else {
+                        glib::ControlFlow::Continue
+                    }
+                }
+            ));
+        }
+    ));
+
+    // don't handle CLI args, since that's Bevy's job
+    let gtk_exit = gtk_app.run_with_args::<&str>(&[]);
+    bevy_exit
+        .take()
+        .unwrap_or_else(|| AppExit::from_code(gtk_exit.get()))
+}
+
+fn idle_update(bevy_app: &mut App) -> Option<AppExit> {
+    if bevy_app.plugins_state() == PluginsState::Cleaned {
+        bevy_app.update();
+    }
+
+    bevy_app.should_exit()
+}
+
+/*mod adwaita_app;
 mod hal_custom;
 mod render;
 
-use std::{
-    any::type_name,
-    sync::{
-        atomic::{AtomicBool, AtomicI32, Ordering},
-        Arc,
+use {
+    adwaita_app::{WindowCommand, WindowOpen},
+    atomicbox::AtomicOptionBox,
+    bevy::{
+        ecs::system::EntityCommand,
+        prelude::*,
+        render::{
+            Extract, Render, RenderApp, RenderPlugin, RenderSet,
+            camera::{ManualTextureViewHandle, ManualTextureViews, RenderTarget},
+            renderer::RenderDevice,
+            settings::WgpuSettings,
+        },
+        window::{ExitCondition, WindowRef},
     },
-    thread,
-};
-
-use adwaita_app::{WindowCommand, WindowOpen};
-use atomicbox::AtomicOptionBox;
-use bevy::{
-    ecs::system::EntityCommand,
-    prelude::*,
-    render::{
-        camera::{ManualTextureViewHandle, ManualTextureViews, RenderTarget},
-        renderer::RenderDevice,
-        settings::WgpuSettings,
-        Extract, Render, RenderApp, RenderPlugin, RenderSet,
+    render::{DmabufInfo, FrameInfo},
+    std::{
+        any::type_name,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, AtomicI32, Ordering},
+        },
+        thread,
     },
-    window::{ExitCondition, WindowRef},
 };
-use render::{DmabufInfo, FrameInfo};
 
 #[derive(Clone)]
 pub struct AdwaitaWindowPlugin {
@@ -415,7 +577,8 @@ fn put_back_next_frame_if_not_sent(mut windows: Query<&mut RenderWindow>) {
 // render                         |-+-------|--------------+-+-|---
 //                                  ^                      ^ ^
 //            take `next_to_render` |                      | | in `Last`:
-//          store in `next_to_send` |                      | | if we still have a `next_to_send`,
-//                                                         | | put it back
+//          store in `next_to_send` |                      | | if we still have
+// a `next_to_send`,                                                         | | put it back
 //                                 after RenderSet::Render |
 //                            take and send `next_to_send` |
+*/
