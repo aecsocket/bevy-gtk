@@ -35,38 +35,6 @@ impl WindowProxy {
     }
 }
 
-fn replace_content(old: &gtk::Widget, new: Option<&gtk::Widget>) {
-    let parent = match (old.parent(), new) {
-        (Some(parent), _) => parent,
-        (None, None) => return,
-        (None, Some(_)) => panic!("if replacing the content, the old content must have a parent"),
-    };
-
-    #[cfg(feature = "adwaita")]
-    {
-        use adw::prelude::*;
-
-        if let Some(parent) = parent.downcast_ref::<adw::ApplicationWindow>() {
-            parent.set_content(new);
-            return;
-        }
-        if let Some(parent) = parent.downcast_ref::<adw::ToolbarView>() {
-            parent.set_content(new);
-            return;
-        }
-    }
-    if let Some(parent) = parent.downcast_ref::<gtk::ApplicationWindow>() {
-        parent.set_child(new);
-        return;
-    }
-    if let Some(parent) = parent.downcast_ref::<gtk::Overlay>() {
-        parent.set_child(new);
-        return;
-    }
-
-    unreachable!("invalid parent widget {parent:?}");
-}
-
 impl GtkWindows {
     pub(crate) fn new(use_adw: bool) -> Self {
         Self {
@@ -81,6 +49,29 @@ impl GtkWindows {
 
     pub fn entity_to_proxy(&self) -> &HashMap<Entity, WindowProxy> {
         &self.entity_to_proxy
+    }
+}
+
+#[derive(Component)]
+pub struct NewWindowContent(pub Option<Box<dyn MakeWindowContent>>);
+
+impl<T: MakeWindowContent> From<T> for NewWindowContent {
+    fn from(value: T) -> Self {
+        Self(Some(Box::new(value)))
+    }
+}
+
+pub trait MakeWindowContent: Send + Sync + 'static {
+    fn make(self: Box<Self>) -> gtk::Widget;
+}
+
+impl<W, F> MakeWindowContent for F
+where
+    W: IsA<gtk::Widget>,
+    F: FnOnce() -> W + Send + Sync + 'static,
+{
+    fn make(self: Box<Self>) -> gtk::Widget {
+        (self)().into()
     }
 }
 
@@ -134,14 +125,22 @@ pub fn create_bevy_to_gtk(
 }
 
 pub fn sync_bevy_to_gtk(
-    changed_windows: Query<(Entity, &Window), Changed<Window>>,
+    mut commands: Commands,
+    mut changed_windows: Query<(Entity, &Window, Option<&mut NewWindowContent>), Changed<Window>>,
     mut gtk_windows: NonSendMut<GtkWindows>,
 ) {
-    for (entity, bevy_window) in &changed_windows {
+    for (entity, bevy_window, mut new_window_content) in &mut changed_windows {
         let gtk_windows = &mut *gtk_windows;
         let Some(proxy) = gtk_windows.entity_to_proxy.get_mut(&entity) else {
             continue;
         };
+
+        if let Some(new_window_content) = &mut new_window_content {
+            if let Some(make_content) = new_window_content.0.take() {
+                proxy.set_content(make_content.make());
+            }
+            commands.entity(entity).remove::<NewWindowContent>();
+        }
 
         sync_one(gtk_windows.use_adw, &bevy_window, proxy);
     }
@@ -153,7 +152,6 @@ fn sync_one(use_adw: bool, bevy_window: &Window, proxy: &mut WindowProxy) {
             false
         } else {
             *dst = src;
-
             true
         }
     }
@@ -176,55 +174,93 @@ fn sync_one(use_adw: bool, bevy_window: &Window, proxy: &mut WindowProxy) {
     if rebuild_widgets {
         if_adw!(
             use_adw,
-            if let Some(window) = proxy.gtk.downcast_ref::<adw::ApplicationWindow>() {
+            if let Some(adw_window) = proxy.gtk.downcast_ref::<adw::ApplicationWindow>() {
                 use adw::prelude::*;
 
-                // ensure `proxy.content` has no parent before we add it to a new parent
-                replace_content(&proxy.content, None);
-                if bevy_window.titlebar_shown {
-                    if bevy_window.titlebar_transparent {
-                        if bevy_window.titlebar_show_buttons {
-                            // same margin as `adw::HeaderBar`
-                            const MARGIN: i32 = 6;
-
-                            let window_controls = gtk::WindowControls::builder()
-                                .side(gtk::PackType::End)
-                                .halign(gtk::Align::End)
-                                .valign(gtk::Align::Start)
-                                .margin_start(MARGIN)
-                                .margin_end(MARGIN)
-                                .margin_top(MARGIN)
-                                .margin_bottom(MARGIN)
-                                .build();
-
-                            let overlay = gtk::Overlay::new();
-                            overlay.add_overlay(&window_controls);
-                            overlay.set_child(Some(&proxy.content));
-                            window.set_content(Some(&overlay));
-                        } else {
-                            window.set_content(Some(&proxy.content));
-                        }
-                    } else {
-                        let header = adw::HeaderBar::new();
-                        if !bevy_window.titlebar_show_title {
-                            header.set_title_widget(Some(&gtk::Label::new(None)));
-                        }
-                        if !bevy_window.titlebar_show_buttons {
-                            header.set_show_start_title_buttons(false);
-                            header.set_show_end_title_buttons(false);
-                        }
-
-                        let toolbar = adw::ToolbarView::new();
-                        toolbar.add_top_bar(&header);
-                        toolbar.set_content(Some(&proxy.content));
-                        window.set_content(Some(&toolbar));
-                    }
-                } else {
-                    window.set_content(Some(&proxy.content));
-                };
+                let content_root = adw_content_root(bevy_window, &proxy.content);
+                adw_window.set_content(Some(&content_root));
             },
             proxy.gtk.set_child(Some(&proxy.content)),
         );
+    }
+}
+
+fn replace_content(old: &gtk::Widget, new: Option<&gtk::Widget>) {
+    let parent = match (old.parent(), new) {
+        (Some(parent), _) => parent,
+        (None, None) => return,
+        (None, Some(_)) => panic!("if replacing the content, the old content must have a parent"),
+    };
+
+    #[cfg(feature = "adwaita")]
+    {
+        use adw::prelude::*;
+
+        if let Some(parent) = parent.downcast_ref::<adw::ApplicationWindow>() {
+            parent.set_content(new);
+            return;
+        }
+        if let Some(parent) = parent.downcast_ref::<adw::ToolbarView>() {
+            parent.set_content(new);
+            return;
+        }
+    }
+    if let Some(parent) = parent.downcast_ref::<gtk::ApplicationWindow>() {
+        parent.set_child(new);
+        return;
+    }
+    if let Some(parent) = parent.downcast_ref::<gtk::Overlay>() {
+        parent.set_child(new);
+        return;
+    }
+
+    unreachable!("invalid parent widget {parent:?}");
+}
+
+#[cfg(feature = "adwaita")]
+fn adw_content_root(bevy_window: &Window, content: &gtk::Widget) -> gtk::Widget {
+    // ensure `proxy.content` has no parent before we add it to a new parent
+    replace_content(content, None);
+    if bevy_window.titlebar_shown {
+        if bevy_window.titlebar_transparent {
+            if bevy_window.titlebar_show_buttons {
+                // same margin as `adw::HeaderBar`
+                const MARGIN: i32 = 6;
+
+                let window_controls = gtk::WindowControls::builder()
+                    .side(gtk::PackType::End)
+                    .halign(gtk::Align::End)
+                    .valign(gtk::Align::Start)
+                    .margin_start(MARGIN)
+                    .margin_end(MARGIN)
+                    .margin_top(MARGIN)
+                    .margin_bottom(MARGIN)
+                    .build();
+
+                let overlay = gtk::Overlay::new();
+                overlay.add_overlay(&window_controls);
+                overlay.set_child(Some(content));
+                overlay.upcast()
+            } else {
+                content.clone().upcast()
+            }
+        } else {
+            let header = adw::HeaderBar::new();
+            if !bevy_window.titlebar_show_title {
+                header.set_title_widget(Some(&gtk::Label::new(None)));
+            }
+            if !bevy_window.titlebar_show_buttons {
+                header.set_show_start_title_buttons(false);
+                header.set_show_end_title_buttons(false);
+            }
+
+            let toolbar = adw::ToolbarView::new();
+            toolbar.add_top_bar(&header);
+            toolbar.set_content(Some(content));
+            toolbar.upcast()
+        }
+    } else {
+        content.clone().upcast()
     }
 }
 

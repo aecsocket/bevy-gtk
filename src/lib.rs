@@ -29,7 +29,7 @@ macro_rules! if_adw {
 
 mod window;
 
-pub use window::GtkWindows;
+pub use window::*;
 use {
     bevy_app::{PluginsState, prelude::*},
     bevy_derive::Deref,
