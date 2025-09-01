@@ -35,11 +35,12 @@ bevy_utils = { version = "0.17.0-dev", default-features = false }
 bevy_window = { version = "0.17.0-dev", default-features = false }
 
 async-channel = { version = "2.5" }
-gdk4          = { version = "0.10" }
+gdk4          = { version = "0.10", features = ["v4_14"] }
 gio           = { version = "0.21" }
 glib          = { version = "0.21" }
 gtk4          = { version = "0.10", features = ["v4_16"] }
 log           = { version = "0.4" }
+oneshot = { version = "0.1"}
 
 ash         = { optional = true, version = "0.38", default-features = false }
 bevy_render = { optional = true, version = "0.17.0-dev", default-features = false }

@@ -15,7 +15,7 @@ RUN groupadd -g 1000 dev && \
 
 RUN dnf -y copr enable atim/starship && \
     dnf -y copr enable alternateved/eza && \
-    dnf -y install fish starship direnv eza ripgrep helix && \
+    dnf -y install fish starship direnv eza ripgrep helix procps-ng && \
     chsh -s /usr/bin/fish dev
 COPY <<"EOF" /etc/fish/config.fish
 set fish_greeting

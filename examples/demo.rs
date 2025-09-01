@@ -5,9 +5,14 @@ use {
         render::renderer::RenderDevice,
         winit::WinitPlugin,
     },
-    bevy_gtk::{GtkPlugin, NewWindowContent, render::DmabufTexture},
+    bevy_gtk::{
+        GtkPlugin, NewWindowContent,
+        render::{DmabufTexture, GtkRenderData, GtkRenderPlugin},
+    },
     bevy_render::texture::ManualTextureView,
-    bevy_window::PrimaryWindow,
+    bevy_window::{PrimaryWindow, WindowRef, WindowResolution},
+    gtk4::prelude::*,
+    std::{cell::RefCell, sync::Mutex},
     wgpu::TextureViewDescriptor,
 };
 
@@ -45,6 +50,13 @@ fn main() -> AppExit {
             titlebar_transparent: args.titlebar_transparent,
             titlebar_show_title: !args.no_title,
             titlebar_show_buttons: !args.no_buttons,
+            resolution: WindowResolution::new(50, 50),
+            resize_constraints: WindowResizeConstraints {
+                min_width: 1.0,
+                min_height: 1.0,
+                max_width: f32::INFINITY,
+                max_height: f32::INFINITY,
+            },
             ..default()
         }),
         ..default()
@@ -52,21 +64,38 @@ fn main() -> AppExit {
     match args.mode {
         DemoMode::Winit => app.add_plugins(default_plugins),
         DemoMode::Gtk => app.add_plugins((
-            GtkPlugin::new(APP_ID).without_adw(),
+            GtkRenderPlugin,
             default_plugins.build().disable::<WinitPlugin>(),
+            GtkPlugin::new(APP_ID).without_adw(),
         )),
         DemoMode::Adw => app.add_plugins((
-            GtkPlugin::new(APP_ID).with_adw(),
+            GtkRenderPlugin,
             default_plugins.build().disable::<WinitPlugin>(),
+            GtkPlugin::new(APP_ID).with_adw(),
         )),
     };
     app.add_systems(Startup, setup)
-        .add_systems(Update, rotate_cube)
+        .add_systems(
+            Update,
+            (
+                rotate_cube,
+                |mut mt: ResMut<ManualTextureViews>, mut c: Query<&mut Camera>| {
+                    if *DROPPED.lock().unwrap() {
+                        mt.remove(&ManualTextureViewHandle(0));
+                        for mut c in &mut c {
+                            c.target = RenderTarget::Window(WindowRef::Primary);
+                        }
+                    }
+                },
+            ),
+        )
         .run()
 }
 
 #[derive(Debug, Component)]
 struct Rotating;
+
+static DROPPED: Mutex<bool> = Mutex::new(false);
 
 fn setup(
     mut commands: Commands,
@@ -74,6 +103,7 @@ fn setup(
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut manual_texture_views: ResMut<ManualTextureViews>,
     render_device: Res<RenderDevice>,
+    gtk_render_data: Res<GtkRenderData>,
     window: Single<Entity, With<PrimaryWindow>>,
 ) {
     // circular base
@@ -100,15 +130,17 @@ fn setup(
 
     // camera
     let (width, height) = (512, 512);
-    let texture = DmabufTexture::new(render_device.wgpu_device(), width, height).unwrap();
-    let wg_texture_view = texture.create_view(&TextureViewDescriptor::default());
+    let fb = gtk_render_data
+        .create_dmabuf_texture(render_device.wgpu_device(), width, height, None)
+        .unwrap();
+    let fb_view = fb.create_view(&TextureViewDescriptor::default());
     let manual_texture_view = ManualTextureViewHandle(0);
     manual_texture_views.insert(
         manual_texture_view,
         ManualTextureView {
-            texture_view: wg_texture_view.into(),
+            texture_view: fb_view.into(),
             size: (width, height).into(),
-            format: texture.format(),
+            format: fb.format(),
         },
     );
 
@@ -124,14 +156,32 @@ fn setup(
     commands
         .entity(*window)
         .insert(NewWindowContent::from(move || {
-            let content_texture = bevy_gtk::render::gtk_dmabuf(&texture).unwrap();
-            let content_picture = gtk4::Picture::for_paintable(&content_texture);
-            gtk4::GraphicsOffload::builder()
+            let fb_gdk = fb.build_texture().unwrap();
+            let fb_picture = gtk4::Picture::for_paintable(&fb_gdk);
+            let fb_offload = gtk4::GraphicsOffload::builder()
                 .black_background(true)
-                .child(&content_picture)
+                .child(&fb_picture)
                 .hexpand(true)
                 .vexpand(true)
-                .build()
+                .build();
+
+            let fb = RefCell::new(Some(fb));
+            fb_offload.add_tick_callback(move |_, clock| {
+                if clock.frame_counter() % 2 == 0 {
+                    // fb_picture.set_paintable(None::<&gdk4::Paintable>);
+                } else {
+                    fb_picture.set_paintable(Some(&fb_gdk));
+                }
+
+                // if clock.frame_counter() > 10 && fb.take().is_some() {
+                //     println!("dropped @ {}", clock.frame_counter());
+                //     *DROPPED.lock().unwrap() = true;
+                // }
+
+                glib::ControlFlow::Continue
+            });
+
+            fb_offload
         }));
 }
 

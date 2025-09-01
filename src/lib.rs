@@ -33,7 +33,7 @@ use {
     bevy_ecs::prelude::*,
     glib::clone,
     gtk::prelude::*,
-    log::trace,
+    log::debug,
     std::{
         cell::{Cell, RefCell},
         rc::Rc,
@@ -88,8 +88,34 @@ impl Plugin for GtkPlugin {
                 .upcast::<gtk::Application>(),
             gtk::Application::new(self.app_id.as_deref(), self.app_flags),
         );
+        // prevent app closing when there are no windows;
+        // this is `bevy_window`'s responsibility
+        let app_hold = gtk_app.hold();
 
-        app.insert_non_send_resource(GtkApplication(gtk_app.clone()))
+        let (tx_activated, rx_activated) = oneshot::channel::<()>();
+        let tx_activated = RefCell::new(Some(tx_activated));
+        gtk_app.connect_activate(move |_| {
+            if let Some(tx) = tx_activated.take() {
+                _ = tx.send(());
+            }
+        });
+
+        debug!("Registering GTK app");
+        gtk_app
+            .register(None::<&gio::Cancellable>)
+            .expect("failed to register GTK app");
+        debug!("Activating GTK app");
+        gtk_app.activate();
+        rx_activated
+            .recv()
+            .expect("channel dropped while activating GTK app");
+        debug!("App activated");
+
+        #[cfg(feature = "render")]
+        render::post_activate(app);
+
+        app.insert_non_send_resource(app_hold)
+            .insert_non_send_resource(GtkApplication(gtk_app.clone()))
             .insert_non_send_resource(GtkWindows::new(self.use_adw))
             .set_runner(|bevy_app| gtk_runner(bevy_app, gtk_app))
             .add_systems(
@@ -102,9 +128,6 @@ impl Plugin for GtkPlugin {
                 )
                     .chain(),
             );
-
-        #[cfg(feature = "render")]
-        render::build_app(app);
     }
 }
 
@@ -114,44 +137,25 @@ fn gtk_runner(mut bevy_app: App, gtk_app: gtk::Application) -> AppExit {
         bevy_app.cleanup();
     }
 
-    trace!("Starting GTK app");
+    debug!("Starting GTK app");
 
-    // prevent app closing when there are no windows;
-    // this is `bevy_window`'s responsibility
-    // let _app_hold = gtk_app.hold();
-
-    let bevy_app = Rc::new(RefCell::new(Some(bevy_app)));
     let bevy_exit = Rc::new(Cell::new(None::<AppExit>));
-    gtk_app.connect_activate(clone!(
-        #[strong]
-        bevy_app,
+    glib::idle_add_local(clone!(
         #[strong]
         bevy_exit,
-        move |_| {
-            let Some(mut bevy_app) = bevy_app.take() else {
-                return;
-            };
-
-            // do one update first to spawn initial windows now
-            // otherwise Gio complains about spawning windows before `startup`
-            bevy_app.update();
-            glib::idle_add_local(clone!(
-                #[strong]
-                bevy_exit,
-                move || {
-                    if let Some(exit) = idle_update(&mut bevy_app) {
-                        bevy_exit.set(Some(exit));
-                        glib::ControlFlow::Break
-                    } else {
-                        glib::ControlFlow::Continue
-                    }
-                }
-            ));
+        move || {
+            if let Some(exit) = idle_update(&mut bevy_app) {
+                bevy_exit.set(Some(exit));
+                glib::ControlFlow::Break
+            } else {
+                glib::ControlFlow::Continue
+            }
         }
     ));
 
     // don't handle CLI args, since that's Bevy's job
     let gtk_exit = gtk_app.run_with_args::<&str>(&[]);
+    debug!("GTK app exited with code {gtk_exit:?}");
     bevy_exit
         .take()
         .unwrap_or_else(|| AppExit::from_code(gtk_exit.get()))
