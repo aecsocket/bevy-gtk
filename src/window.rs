@@ -5,9 +5,9 @@ use {
     bevy_window::{
         ClosingWindow, Window, WindowCloseRequested, WindowClosed, WindowClosing, WindowCreated,
     },
+    core::mem,
     gtk::prelude::*,
     log::info,
-    std::mem,
 };
 
 #[derive(Debug)]
@@ -17,6 +17,7 @@ pub struct GtkWindows {
 }
 
 impl GtkWindows {
+    #[must_use]
     pub(crate) fn new(use_adw: bool) -> Self {
         Self {
             use_adw,
@@ -24,10 +25,12 @@ impl GtkWindows {
         }
     }
 
+    #[must_use]
     pub fn use_adw(&self) -> bool {
         self.use_adw
     }
 
+    #[must_use]
     pub fn entity_to_proxy(&self) -> &HashMap<Entity, WindowProxy> {
         &self.entity_to_proxy
     }
@@ -37,10 +40,7 @@ impl GtkWindows {
 pub struct WindowProxy {
     pub gtk: gtk::ApplicationWindow,
     content: gtk::Widget,
-    cache_titlebar_shown: bool,
-    cache_titlebar_transparent: bool,
-    cache_titlebar_show_title: bool,
-    cache_titlebar_show_buttons: bool,
+    cache: Window,
     rx_close_request: async_channel::Receiver<()>,
 }
 
@@ -109,11 +109,14 @@ pub fn create_bevy_to_gtk(
         let mut proxy = WindowProxy {
             gtk: gtk_window,
             content: gtk::Label::new(None).upcast(),
-            // negate cache values to force a widget tree rebuild
-            cache_titlebar_shown: !bevy_window.titlebar_shown,
-            cache_titlebar_transparent: !bevy_window.titlebar_transparent,
-            cache_titlebar_show_title: !bevy_window.titlebar_show_title,
-            cache_titlebar_show_buttons: !bevy_window.titlebar_show_buttons,
+            cache: Window {
+                // negate cache values to force a widget tree rebuild
+                titlebar_shown: !bevy_window.titlebar_shown,
+                titlebar_transparent: !bevy_window.titlebar_transparent,
+                titlebar_show_title: !bevy_window.titlebar_show_title,
+                titlebar_show_buttons: !bevy_window.titlebar_show_buttons,
+                ..bevy_window.clone()
+            },
             rx_close_request,
         };
         sync_one(gtk_windows.use_adw, bevy_window, &mut proxy);
@@ -142,7 +145,7 @@ pub fn sync_bevy_to_gtk(
             commands.entity(entity).remove::<NewWindowContent>();
         }
 
-        sync_one(gtk_windows.use_adw, &bevy_window, proxy);
+        sync_one(gtk_windows.use_adw, bevy_window, proxy);
     }
 }
 
@@ -160,20 +163,26 @@ fn sync_one(use_adw: bool, bevy_window: &Window, proxy: &mut WindowProxy) {
     gtk_window.set_title(Some(&bevy_window.title));
 
     // logical pixels, so casting is fine
-    gtk_window.set_width_request(bevy_window.resolution.width() as i32);
-    gtk_window.set_height_request(bevy_window.resolution.height() as i32);
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "small numbers; truncation is fine"
+    )]
+    {
+        gtk_window.set_width_request(bevy_window.resolution.width() as i32);
+        gtk_window.set_height_request(bevy_window.resolution.height() as i32);
+    }
 
-    let rebuild_widgets = cmp_ex(&mut proxy.cache_titlebar_shown, bevy_window.titlebar_shown)
+    let rebuild_widgets = cmp_ex(&mut proxy.cache.titlebar_shown, bevy_window.titlebar_shown)
         || cmp_ex(
-            &mut proxy.cache_titlebar_transparent,
+            &mut proxy.cache.titlebar_transparent,
             bevy_window.titlebar_transparent,
         )
         || cmp_ex(
-            &mut proxy.cache_titlebar_show_title,
+            &mut proxy.cache.titlebar_show_title,
             bevy_window.titlebar_show_title,
         )
         || cmp_ex(
-            &mut proxy.cache_titlebar_show_buttons,
+            &mut proxy.cache.titlebar_show_buttons,
             bevy_window.titlebar_show_buttons,
         );
     if rebuild_widgets {

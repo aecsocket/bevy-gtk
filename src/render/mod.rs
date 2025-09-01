@@ -38,13 +38,16 @@ pub struct GtkRenderData {
 }
 
 impl GtkRenderData {
+    #[must_use]
     pub fn dmabuf_formats(&self) -> &[DrmFormat] {
         &self.dmabuf_formats
     }
 }
 
 pub(crate) fn post_activate(app: &mut App) {
-    let dmabuf_formats = gdk::Display::default().unwrap().dmabuf_formats();
+    let dmabuf_formats = gdk::Display::default()
+        .expect("failed to get GDK display")
+        .dmabuf_formats();
     let dmabuf_formats = (0..dmabuf_formats.n_formats())
         .filter_map(|i| {
             let (code, modifier) = dmabuf_formats.format(i);
@@ -55,8 +58,7 @@ pub(crate) fn post_activate(app: &mut App) {
                     trace!(
                         "dmabuf format ({}, {modifier:?}) has unknown fourcc",
                         err.display()
-                            .map(|s| s.to_string())
-                            .unwrap_or_else(|| format!("{code}"))
+                            .map_or_else(|| format!("{code}"), |s| s.to_string(),)
                     );
                 })
                 .ok()

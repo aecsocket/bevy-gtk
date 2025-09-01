@@ -7,7 +7,7 @@ use {
     },
     bevy_gtk::{
         GtkPlugin, NewWindowContent,
-        render::{DmabufTexture, GtkRenderData, GtkRenderPlugin},
+        render::{GtkRenderData, GtkRenderPlugin},
     },
     bevy_render::texture::ManualTextureView,
     bevy_window::{PrimaryWindow, WindowRef, WindowResolution},
@@ -156,7 +156,7 @@ fn setup(
     commands
         .entity(*window)
         .insert(NewWindowContent::from(move || {
-            let fb_gdk = fb.build_texture().unwrap();
+            let fb_gdk = fb.build_gdk_texture().unwrap();
             let fb_picture = gtk4::Picture::for_paintable(&fb_gdk);
             let fb_offload = gtk4::GraphicsOffload::builder()
                 .black_background(true)

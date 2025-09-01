@@ -1,3 +1,4 @@
+extern crate alloc;
 extern crate gdk4 as gdk;
 extern crate gio;
 extern crate gtk4 as gtk;
@@ -28,16 +29,14 @@ macro_rules! if_adw {
 }
 
 use {
+    alloc::rc::Rc,
     bevy_app::{PluginsState, prelude::*},
     bevy_derive::Deref,
     bevy_ecs::prelude::*,
+    core::cell::{Cell, RefCell},
     glib::clone,
     gtk::prelude::*,
     log::debug,
-    std::{
-        cell::{Cell, RefCell},
-        rc::Rc,
-    },
 };
 
 mod window;
@@ -65,6 +64,7 @@ impl GtkPlugin {
         }
     }
 
+    #[must_use]
     pub fn with_adw(self) -> Self {
         Self {
             use_adw: true,
@@ -72,6 +72,7 @@ impl GtkPlugin {
         }
     }
 
+    #[must_use]
     pub fn without_adw(self) -> Self {
         Self {
             use_adw: false,
