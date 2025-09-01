@@ -27,9 +27,6 @@ macro_rules! if_adw {
     }};
 }
 
-mod window;
-
-pub use window::*;
 use {
     bevy_app::{PluginsState, prelude::*},
     bevy_derive::Deref,
@@ -42,6 +39,12 @@ use {
         rc::Rc,
     },
 };
+
+mod window;
+pub use window::*;
+
+#[cfg(feature = "render")]
+pub mod render;
 
 #[derive(Default)]
 pub struct GtkPlugin {
@@ -99,6 +102,9 @@ impl Plugin for GtkPlugin {
                 )
                     .chain(),
             );
+
+        #[cfg(feature = "render")]
+        render::build_app(app);
     }
 }
 

@@ -1,36 +1,64 @@
 [package]
-name = "bevy_gtk"
+name    = "bevy_gtk"
 version = "0.1.0"
 # description = ""
 
-authors      = ["aecsocket <aecsocket@tutanota.com>"]
+authors = ["aecsocket <aecsocket@tutanota.com>"]
 # categories   = ["game-development", "network-programming"]
-edition      = "2024"
+edition = "2024"
 # keywords     = ["gamedev", "bevy"]
 license      = "MIT OR Apache-2.0"
 repository   = "https://github.com/aecsocket/bevy-gtk"
 rust-version = "1.86.0"
 
 [features]
+default = ["render"]
+
 adwaita = ["dep:libadwaita"]
+render = [
+  "bevy_render/raw_vulkan_init",
+  "dep:ash",
+  "dep:bevy_render",
+  "dep:drm-fourcc",
+  "dep:wgpu",
+  "dep:wgpu-hal",
+]
 
 [dependencies]
-bevy_ecs = { version = "0.16", default-features = false }
-bevy_app = { version = "0.16", default-features = false }
-bevy_window = { version = "0.16", default-features = false }
-bevy_platform = { version = "0.16", default-features = false, features = ["alloc"] }
-bevy_derive = { version = "0.16", default-features = false }
+bevy_app = { version = "0.17.0-dev", default-features = false }
+bevy_derive = { version = "0.17.0-dev", default-features = false }
+bevy_ecs = { version = "0.17.0-dev", default-features = false }
+bevy_platform = { version = "0.17.0-dev", default-features = false, features = [
+  "alloc",
+] }
+bevy_utils = { version = "0.17.0-dev", default-features = false }
+bevy_window = { version = "0.17.0-dev", default-features = false }
 
-log = { version = "0.4" }
-gtk4 = { version = "0.10", features = ["v4_16"] }
-gdk4 = { version = "0.10" }
-gio = { version = "0.21" }
-glib = { version = "0.21" }
 async-channel = { version = "2.5" }
+gdk4          = { version = "0.10" }
+gio           = { version = "0.21" }
+glib          = { version = "0.21" }
+gtk4          = { version = "0.10", features = ["v4_16"] }
+log           = { version = "0.4" }
 
-libadwaita = { optional = true, version = "0.8", features = ["v1_6"] }
+ash         = { optional = true, version = "0.38", default-features = false }
+bevy_render = { optional = true, version = "0.17.0-dev", default-features = false }
+drm-fourcc  = { optional = true, version = "2.2", default-features = false }
+libadwaita  = { optional = true, version = "0.8", features = ["v1_6"] }
+wgpu        = { optional = true, version = "26.0", default-features = false }
+wgpu-hal    = { optional = true, version = "26.0", default-features = false }
 
 [dev-dependencies]
-bevy = { version = "0.16", features = ["wayland"] }
-clap = { version = "4.5", features = ["derive"] }
+bevy     = { version = "0.17.0-dev", features = ["wayland"] }
 bevy_gtk = { path = ".", features = ["adwaita"] }
+clap     = { version = "4.5", features = ["derive"] }
+
+[patch.crates-io]
+bevy = { git = "https://github.com/bevyengine/bevy", branch = "main" }
+bevy_app = { git = "https://github.com/bevyengine/bevy", branch = "main" }
+bevy_derive = { git = "https://github.com/bevyengine/bevy", branch = "main" }
+bevy_ecs = { git = "https://github.com/bevyengine/bevy", branch = "main" }
+bevy_platform = { git = "https://github.com/bevyengine/bevy", branch = "main" }
+bevy_utils = { git = "https://github.com/bevyengine/bevy", branch = "main" }
+bevy_window = { git = "https://github.com/bevyengine/bevy", branch = "main" }
+bevy_render = { git = "https://github.com/bevyengine/bevy", branch = "main" }

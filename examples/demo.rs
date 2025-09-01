@@ -1,20 +1,14 @@
 use {
     bevy::{
+        camera::{ManualTextureViewHandle, RenderTarget},
         prelude::*,
-        render::{
-            camera::{
-                ManualTextureView, ManualTextureViewHandle, ManualTextureViews, RenderTarget,
-            },
-            render_resource::{
-                Extent3d, TextureAspect, TextureDescriptor, TextureDimension, TextureFormat,
-                TextureUsages, TextureView, TextureViewDescriptor,
-            },
-            renderer::RenderDevice,
-        },
+        render::renderer::RenderDevice,
         winit::WinitPlugin,
     },
-    bevy_gtk::{GtkPlugin, NewWindowContent},
+    bevy_gtk::{GtkPlugin, NewWindowContent, render::DmabufTexture},
+    bevy_render::texture::ManualTextureView,
     bevy_window::PrimaryWindow,
+    wgpu::TextureViewDescriptor,
 };
 
 #[derive(Debug, clap::Parser)]
@@ -58,12 +52,12 @@ fn main() -> AppExit {
     match args.mode {
         DemoMode::Winit => app.add_plugins(default_plugins),
         DemoMode::Gtk => app.add_plugins((
-            default_plugins.build().disable::<WinitPlugin>(),
             GtkPlugin::new(APP_ID).without_adw(),
+            default_plugins.build().disable::<WinitPlugin>(),
         )),
         DemoMode::Adw => app.add_plugins((
-            default_plugins.build().disable::<WinitPlugin>(),
             GtkPlugin::new(APP_ID).with_adw(),
+            default_plugins.build().disable::<WinitPlugin>(),
         )),
     };
     app.add_systems(Startup, setup)
@@ -105,46 +99,22 @@ fn setup(
     ));
 
     // camera
-    // let size = Extent3d {
-    //     width: 512,
-    //     height: 512,
-    //     depth_or_array_layers: 1,
-    // };
-    // let texture_format = TextureFormat::bevy_default();
-    // let texture = render_device.create_texture(&TextureDescriptor {
-    //     label: None,
-    //     size,
-    //     mip_level_count: 1,
-    //     sample_count: 1,
-    //     dimension: TextureDimension::D2,
-    //     format: texture_format,
-    //     usage: TextureUsages::RENDER_ATTACHMENT,
-    //     view_formats: &[],
-    // });
-    // let texture_view = texture.create_view(&TextureViewDescriptor {
-    //     label: None,
-    //     format: None,
-    //     dimension: None,
-    //     usage: None,
-    //     aspect: TextureAspect::All,
-    //     base_mip_level: 1,
-    //     mip_level_count: Some(1),
-    //     base_array_layer: 0,
-    //     array_layer_count: None,
-    // });
-    // let manual_texture_view = ManualTextureViewHandle(0);
-    // manual_texture_views.insert(
-    //     manual_texture_view,
-    //     ManualTextureView {
-    //         texture_view,
-    //         size: (size.width, size.height).into(),
-    //         format: texture_format,
-    //     },
-    // );
+    let (width, height) = (512, 512);
+    let texture = DmabufTexture::new(render_device.wgpu_device(), width, height).unwrap();
+    let wg_texture_view = texture.create_view(&TextureViewDescriptor::default());
+    let manual_texture_view = ManualTextureViewHandle(0);
+    manual_texture_views.insert(
+        manual_texture_view,
+        ManualTextureView {
+            texture_view: wg_texture_view.into(),
+            size: (width, height).into(),
+            format: texture.format(),
+        },
+    );
 
     commands.spawn((
         Camera {
-            // target: RenderTarget::TextureView(manual_texture_view),
+            target: RenderTarget::TextureView(manual_texture_view),
             ..default()
         },
         Camera3d::default(),
@@ -153,7 +123,16 @@ fn setup(
 
     commands
         .entity(*window)
-        .insert(NewWindowContent::from(|| gtk4::Label::new(Some("foobar"))));
+        .insert(NewWindowContent::from(move || {
+            let content_texture = bevy_gtk::render::gtk_dmabuf(&texture).unwrap();
+            let content_picture = gtk4::Picture::for_paintable(&content_texture);
+            gtk4::GraphicsOffload::builder()
+                .black_background(true)
+                .child(&content_picture)
+                .hexpand(true)
+                .vexpand(true)
+                .build()
+        }));
 }
 
 fn rotate_cube(time: Res<Time>, mut query: Query<&mut Transform, With<Rotating>>) {

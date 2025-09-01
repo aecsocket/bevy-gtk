@@ -16,6 +16,23 @@ pub struct GtkWindows {
     entity_to_proxy: HashMap<Entity, WindowProxy>,
 }
 
+impl GtkWindows {
+    pub(crate) fn new(use_adw: bool) -> Self {
+        Self {
+            use_adw,
+            entity_to_proxy: HashMap::new(),
+        }
+    }
+
+    pub fn use_adw(&self) -> bool {
+        self.use_adw
+    }
+
+    pub fn entity_to_proxy(&self) -> &HashMap<Entity, WindowProxy> {
+        &self.entity_to_proxy
+    }
+}
+
 #[derive(Debug)]
 pub struct WindowProxy {
     pub gtk: gtk::ApplicationWindow,
@@ -35,37 +52,20 @@ impl WindowProxy {
     }
 }
 
-impl GtkWindows {
-    pub(crate) fn new(use_adw: bool) -> Self {
-        Self {
-            use_adw,
-            entity_to_proxy: HashMap::new(),
-        }
-    }
-
-    pub fn use_adw(&self) -> bool {
-        self.use_adw
-    }
-
-    pub fn entity_to_proxy(&self) -> &HashMap<Entity, WindowProxy> {
-        &self.entity_to_proxy
-    }
-}
-
 #[derive(Component)]
-pub struct NewWindowContent(pub Option<Box<dyn MakeWindowContent>>);
+pub struct NewWindowContent(pub Option<Box<dyn MakeWidget>>);
 
-impl<T: MakeWindowContent> From<T> for NewWindowContent {
+impl<T: MakeWidget> From<T> for NewWindowContent {
     fn from(value: T) -> Self {
         Self(Some(Box::new(value)))
     }
 }
 
-pub trait MakeWindowContent: Send + Sync + 'static {
+pub trait MakeWidget: Send + Sync + 'static {
     fn make(self: Box<Self>) -> gtk::Widget;
 }
 
-impl<W, F> MakeWindowContent for F
+impl<W, F> MakeWidget for F
 where
     W: IsA<gtk::Widget>,
     F: FnOnce() -> W + Send + Sync + 'static,
@@ -221,6 +221,7 @@ fn replace_content(old: &gtk::Widget, new: Option<&gtk::Widget>) {
 fn adw_content_root(bevy_window: &Window, content: &gtk::Widget) -> gtk::Widget {
     // ensure `proxy.content` has no parent before we add it to a new parent
     replace_content(content, None);
+
     if bevy_window.titlebar_shown {
         if bevy_window.titlebar_transparent {
             if bevy_window.titlebar_show_buttons {
