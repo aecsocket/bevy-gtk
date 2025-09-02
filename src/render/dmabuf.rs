@@ -40,7 +40,6 @@ impl DmabufTexture {
         let hal_device = unsafe { device.as_hal::<wgpu_hal::vulkan::Api>() }
             .expect("render device is not a Vulkan device");
         create_dmabuf_texture(
-            adapter,
             &hal_adapter,
             device,
             &hal_device,
@@ -110,7 +109,6 @@ const MEMORY_HANDLE_TYPE: vk::ExternalMemoryHandleTypeFlags =
     vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT;
 
 fn create_dmabuf_texture(
-    wgpu_adapter: &wgpu::Adapter,
     hal_adapter: &wgpu_hal::vulkan::Adapter,
     wgpu_device: &wgpu::Device,
     hal_device: &wgpu_hal::vulkan::Device,
@@ -155,15 +153,21 @@ fn create_dmabuf_texture(
     let stride = width * u32::BITS / 8;
 
     // check if we can use this modifier with this format
+
     let Some(drm_modifier_info) =
         get_drm_modifiers_for_format(vk_instance, vk_physical_device, vk_format)
             .find(|info| info.modifier == drm_modifier)
     else {
-        return Err(format!("modifier {drm_modifier:?} is not available for {vk_format:?}").into());
+        return Err(format!(
+            "modifier {drm_modifier:?} is not available for
+    {vk_format:?}"
+        )
+        .into());
     };
     if drm_modifier_info.plane_count != DRM_MODIFIER_PLANE_COUNT {
         return Err(format!(
-            "cannot use DRM modifier with more than 1 memory plane (has {} planes)",
+            "cannot use DRM modifier with more than 1 memory plane (has {}
+    planes)",
             drm_modifier_info.plane_count
         )
         .into());
@@ -178,7 +182,6 @@ fn create_dmabuf_texture(
             queue_family_index_count: 0,
             ..default()
         };
-
         let params = vk::PhysicalDeviceImageFormatInfo2 {
             format: vk_format,
             ty: VK_DIM,
@@ -359,6 +362,7 @@ fn create_dmabuf_texture(
     })
 }
 
+#[derive(Debug)]
 struct DrmModifierInfo {
     modifier: DrmModifier,
     plane_count: u32,

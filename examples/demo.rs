@@ -8,7 +8,7 @@ use {
     },
     bevy_gtk::{
         GtkPlugin, NewWindowContent,
-        render::{DmabufTexture, GtkRenderData, GtkRenderPlugin},
+        render::{DmabufTexture, GtkRenderData},
     },
     bevy_render::renderer::RenderAdapter,
     std::sync::Mutex,
@@ -37,7 +37,7 @@ enum DemoMode {
     Adw,
 }
 
-const APP_ID: &str = "io.github.aecsocket.bevy_gtk";
+const APP_ID: &str = "io.github.aecsocket.BevyGtk";
 
 fn main() -> AppExit {
     let args = <Args as clap::Parser>::parse();

@@ -1,18 +1,58 @@
+//! # Architecture
+//!
+//! When you [`GtkViewports::create`] a viewport:
+//! - you get a [`Handle<Image>`] which you can use as a camera render target
+//! - you get a [`ViewportWidgetFactory`] which you can use to make a
+//!   [`gtk::GraphicsOffload`] widget for your app
+//! - a private entity is spawned which maintains the viewport state on the Bevy
+//!   app/render side
+//!
+//! There is a real Bevy image that backs the handle, but we don't actually use
+//! that image for rendering into. We only need it for some compatibility stuff
+//! with [`bevy_render`]. Instead, we make a [`DmabufTexture`] and set that as
+//! the GPU image which Bevy renders into.
+//!
+//! The GTK app is a very thin layer, because it's somewhat annoying to work
+//! with GTK from Bevy. All of its logic is tied to the widget you get from
+//! creating a viewport, which makes cleanup easy - as soon as the widget is
+//! destroyed, everything else goes with it. We then manually propagate this
+//! cleanup to the Bevy world.
+//!
+//! The widget is responsible for:
+//! - reading its own width and height, and sending that to the Bevy app
+//! - receiving [`DmabufTexture`]s from the app, downloading them
+//!
+//! We implement our own swapchain via a front and back buffer. Bevy only ever
+//! writes into the back buffer - this includes texture creation (when the
+//! backing widget is resized), and actual rendering. Then once we've rendered
+//! into the back buffer, we swap the buffers and pass a copy of the (now) front
+//! buffer to the GTK app.
+
+// architecture v2:
+//! Here are the core limitations:
+//! - We have a Bevy app which can push frames at X frames/sec
+//! - We have a GTK app which can consume frames at Y frames/sec
+//! - X and Y may not be the same
+//! - GTK must
+//!
+//! wait...
+
 use {
     crate::render::DmabufTexture,
     alloc::sync::Arc,
     atomicbox::AtomicOptionBox,
     bevy_app::prelude::*,
     bevy_asset::{Assets, Handle, RenderAssetUsages},
+    bevy_camera::CameraUpdateSystems,
     bevy_ecs::{prelude::*, query::QueryItem, system::SystemParam},
     bevy_image::Image,
     bevy_render::{
-        ExtractSchedule, Render, RenderApp, RenderSystems,
+        Render, RenderApp, RenderSystems,
         extract_component::{ExtractComponent, ExtractComponentPlugin},
         render_asset::RenderAssets,
         render_resource::{Texture, TextureView},
         renderer::{RenderAdapter, RenderDevice},
-        sync_world::{RenderEntity, SyncToRenderWorld, SyncWorldPlugin},
+        sync_world::SyncToRenderWorld,
         texture::{DefaultImageSampler, GpuImage},
     },
     core::{
@@ -22,13 +62,27 @@ use {
     },
     glib::clone,
     gtk::prelude::*,
-    log::{debug, trace, warn},
+    log::{debug, trace},
+    std::cell::RefCell,
     wgpu::{Extent3d, TextureDimension, TextureFormat, TextureUsages, TextureViewDescriptor},
 };
 
+#[derive(SystemParam)]
+pub struct GtkViewports<'w, 's> {
+    images: ResMut<'w, Assets<Image>>,
+    commands: Commands<'w, 's>,
+}
+
 pub(super) fn plugin(app: &mut App) {
     app.add_plugins(ExtractComponentPlugin::<RenderViewport>::default())
-        .add_systems(First, despawn_destroyed_viewports);
+        .add_systems(PostStartup, update_images.before(CameraUpdateSystems))
+        .add_systems(
+            PostUpdate,
+            (
+                update_images.before(CameraUpdateSystems),
+                despawn_destroyed_viewports,
+            ),
+        );
 
     let render_app = app
         .get_sub_app_mut(RenderApp)
@@ -49,15 +103,26 @@ struct Viewport {
     ///
     /// [`Camera::target`]: bevy_camera::Camera::target
     image_handle: Handle<Image>,
-    next_frame: Arc<AtomicOptionBox<DmabufTexture>>,
+    next_dmabuf: Arc<AtomicOptionBox<DmabufTexture>>,
     widget_size: Arc<(AtomicU32, AtomicU32)>,
     /// Marks if the GTK-side widget is still alive.
     widget_alive: Arc<()>,
+    old_widget_size: (u32, u32),
+}
+
+#[derive(Debug, Component)]
+struct RenderViewport {
+    image_handle: Handle<Image>,
+    next_dmabuf: Arc<AtomicOptionBox<DmabufTexture>>,
+    widget_size: Arc<(AtomicU32, AtomicU32)>,
+    front_buffer: Option<Framebuffer>,
+    back_buffer: Option<Framebuffer>,
+    old_widget_size: (u32, u32),
+    queued_dmabuf: Option<DmabufTexture>,
 }
 
 #[derive(Debug)]
 struct Framebuffer {
-    dmabuf: DmabufTexture,
     // even though we can make a Bevy `Texture` from the `dmabuf`'s `wgpu::Texture`,
     // we should cache it here, because each new `Texture` increments an ID counter.
     // see `TextureId`
@@ -65,46 +130,14 @@ struct Framebuffer {
     texture_view: TextureView,
 }
 
-#[derive(Debug, Component)]
-struct RenderViewport {
-    image_handle: Handle<Image>,
-    next_frame: Arc<AtomicOptionBox<DmabufTexture>>,
-    widget_size: Arc<(AtomicU32, AtomicU32)>,
-    front_buffer: Option<Framebuffer>,
-    back_buffer: Option<Framebuffer>,
-    old_widget_size: (u32, u32),
-}
-
 // creation logic
-
-#[derive(SystemParam)]
-pub struct GtkViewports<'w, 's> {
-    images: ResMut<'w, Assets<Image>>,
-    commands: Commands<'w, 's>,
-}
 
 const TEXTURE_FORMAT: TextureFormat = TextureFormat::Rgba8UnormSrgb;
 
 impl GtkViewports<'_, '_> {
-    pub fn create(&mut self) -> (Handle<Image>, ViewportWidgetFactory) {
-        // the parameters of this image don't actually matter,
-        // we're gonna replace this image when we get into the render world
-        let mut image = Image::new_uninit(
-            Extent3d {
-                width: 512,
-                height: 512,
-                depth_or_array_layers: 1,
-            },
-            TextureDimension::D2,
-            TEXTURE_FORMAT,
-            RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
-        );
-        image.texture_descriptor.usage = TextureUsages::TEXTURE_BINDING
-            | TextureUsages::COPY_DST
-            | TextureUsages::RENDER_ATTACHMENT;
-        let image_handle = self.images.add(image);
-
-        let next_frame = Arc::new(AtomicOptionBox::none());
+    pub fn create(&mut self) -> (Handle<Image>, WidgetFactory) {
+        let image_handle = self.images.reserve_handle();
+        let next_dmabuf = Arc::new(AtomicOptionBox::none());
         let widget_size = Arc::new((AtomicU32::new(0), AtomicU32::new(0)));
         let widget_alive = Arc::new(());
 
@@ -114,9 +147,10 @@ impl GtkViewports<'_, '_> {
                 SyncToRenderWorld,
                 Viewport {
                     image_handle: image_handle.clone(),
-                    next_frame: next_frame.clone(),
+                    next_dmabuf: next_dmabuf.clone(),
                     widget_size: widget_size.clone(),
                     widget_alive: widget_alive.clone(),
+                    old_widget_size: (u32::MAX, u32::MAX),
                 },
             ))
             .id();
@@ -124,8 +158,8 @@ impl GtkViewports<'_, '_> {
 
         (
             image_handle,
-            ViewportWidgetFactory {
-                next_frame,
+            WidgetFactory {
+                next_dmabuf,
                 widget_size,
                 widget_alive,
             },
@@ -135,19 +169,59 @@ impl GtkViewports<'_, '_> {
 
 impl ExtractComponent for RenderViewport {
     type QueryData = &'static Viewport;
-    type QueryFilter = ();
+    type QueryFilter = Added<Viewport>;
     type Out = Self;
 
     fn extract_component(viewport: QueryItem<Self::QueryData>) -> Option<Self::Out> {
         Some(Self {
             image_handle: viewport.image_handle.clone(),
             widget_size: viewport.widget_size.clone(),
-            next_frame: viewport.next_frame.clone(),
+            next_dmabuf: viewport.next_dmabuf.clone(),
             front_buffer: None,
             back_buffer: None,
             old_widget_size: (u32::MAX, u32::MAX),
+            queued_dmabuf: None,
         })
     }
+}
+
+// frame-to-frame rendering logic, in the main world
+
+fn update_images(mut viewports: Query<&mut Viewport>, mut images: ResMut<Assets<Image>>) {
+    for mut viewport in &mut viewports {
+        let (new_width, new_height) = read_size(&viewport.widget_size);
+        let (old_width, old_height) = viewport.old_widget_size;
+        if new_width != old_width || new_height != old_height {
+            viewport.old_widget_size = (new_width, new_height);
+
+            let mut image = Image::new_uninit(
+                Extent3d {
+                    width: new_width,
+                    height: new_height,
+                    depth_or_array_layers: 1,
+                },
+                TextureDimension::D2,
+                TEXTURE_FORMAT,
+                RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
+            );
+            image.texture_descriptor.usage = TextureUsages::TEXTURE_BINDING
+                | TextureUsages::COPY_DST
+                | TextureUsages::RENDER_ATTACHMENT;
+            images
+                .insert(&viewport.image_handle, image)
+                .expect("image generation should be valid");
+        }
+    }
+}
+
+fn read_size(widget_size: &Arc<(AtomicU32, AtomicU32)>) -> (u32, u32) {
+    let (width, height) = (
+        widget_size.0.load(atomic::Ordering::SeqCst),
+        widget_size.1.load(atomic::Ordering::SeqCst),
+    );
+    // (width.max(1), height.max(1))
+    let (width, height) = (width.max(1), height.max(1));
+    (width.div_ceil(64) * 64, height.div_ceil(64) * 64)
 }
 
 // frame-to-frame rendering logic, in the render world
@@ -160,34 +234,41 @@ fn set_target_images(
     mut gpu_images: ResMut<RenderAssets<GpuImage>>,
 ) {
     for mut viewport in &mut viewports {
-        // recreate the back buffer if we need to
-        // because e.g. widget size has changed
         let (new_width, new_height) = (
             viewport.widget_size.0.load(atomic::Ordering::SeqCst),
             viewport.widget_size.1.load(atomic::Ordering::SeqCst),
         );
-        let (new_width, new_height) = (new_width.max(1), new_height.max(1));
-        // TODO
-        let (new_width, new_height) = (new_width.div_ceil(64) * 64, new_height.div_ceil(64) * 64);
 
         let (old_width, old_height) = viewport.old_widget_size;
         if new_width != old_width || new_height != old_height {
+            viewport.old_widget_size = (new_width, new_height);
+            trace!(
+                "Old/new window size: {old_width}x{old_height} / {new_width}x{new_height}, \
+                 creating new dmabuf"
+            );
+
+            let (tex_width, tex_height) = (
+                new_width.max(1).div_ceil(64) * 64,
+                new_height.max(1).div_ceil(64) * 64,
+            );
+
             let dmabuf = DmabufTexture::new(
-                &*render_adapter,
+                &render_adapter,
                 render_device.wgpu_device(),
-                new_width,
-                new_height,
+                tex_width,
+                tex_height,
                 TEXTURE_FORMAT,
                 None,
             )
-            .unwrap();
+            .expect("failed to create dmabuf texture");
+
             let texture = Texture::from(dmabuf.wgpu_texture().clone());
             let texture_view = texture.create_view(&TextureViewDescriptor::default());
             viewport.back_buffer = Some(Framebuffer {
-                dmabuf,
                 texture,
                 texture_view,
             });
+            viewport.queued_dmabuf = Some(dmabuf);
         }
 
         if let Some(back_buffer) = &viewport.back_buffer {
@@ -214,14 +295,9 @@ fn present_frames(mut viewports: Query<&mut RenderViewport>) {
         // we've just rendered into the back buffer, now we flip buffers
         mem::swap(&mut viewport.back_buffer, &mut viewport.front_buffer);
 
-        if let Some(front_buffer) = &viewport.front_buffer {
-            // the front buffer has our rendered contents;
-            // hand a (ref-counted) clone over to GTK.
-            // we clone instead of moving because we want to reuse images
-            // for rendering on subsequent frames.
-            let dmabuf = front_buffer.dmabuf.clone();
+        if let Some(dmabuf) = viewport.queued_dmabuf.take() {
             viewport
-                .next_frame
+                .next_dmabuf
                 .store(Some(Box::new(dmabuf)), atomic::Ordering::SeqCst);
         }
     }
@@ -241,17 +317,27 @@ fn despawn_destroyed_viewports(viewports: Query<(Entity, &Viewport)>, mut comman
 // GTK-side logic
 
 #[derive(Debug)]
-pub struct ViewportWidgetFactory {
-    next_frame: Arc<AtomicOptionBox<DmabufTexture>>,
+pub struct WidgetFactory {
+    next_dmabuf: Arc<AtomicOptionBox<DmabufTexture>>,
     widget_size: Arc<(AtomicU32, AtomicU32)>,
     widget_alive: Arc<()>,
 }
 
-impl ViewportWidgetFactory {
+impl WidgetFactory {
     #[must_use]
     pub fn make(self) -> gtk::Widget {
+        #[derive(Debug)]
+        struct Swapchain {
+            // keep the dmabuf alive until we get a new texture
+            _dmabuf: DmabufTexture,
+            // these aren't `front` and `back` buffers,
+            // because their role constantly swaps
+            texture_a: gdk::Texture,
+            texture_b: gdk::Texture,
+        }
+
         let Self {
-            next_frame,
+            next_dmabuf,
             widget_size,
             widget_alive,
         } = self;
@@ -280,14 +366,26 @@ impl ViewportWidgetFactory {
             width_listener.set_draw_func(clone!(
                 #[strong]
                 widget_size,
-                move |_, _, width, _| widget_size.0.store(width as u32, atomic::Ordering::SeqCst),
+                move |_, _, width, _| {
+                    #[expect(
+                        clippy::cast_sign_loss,
+                        reason = "GTK should never give us a negative width"
+                    )]
+                    widget_size.0.store(width as u32, atomic::Ordering::SeqCst);
+                },
             ));
 
             let height_listener = gtk::DrawingArea::builder().vexpand(true).build();
             height_listener.set_draw_func(clone!(
                 #[strong]
                 widget_size,
-                move |_, _, _, height| widget_size.1.store(height as u32, atomic::Ordering::SeqCst),
+                move |_, _, _, height| {
+                    #[expect(
+                        clippy::cast_sign_loss,
+                        reason = "GTK should never give us a negative height"
+                    )]
+                    widget_size.1.store(height as u32, atomic::Ordering::SeqCst);
+                },
             ));
 
             let frame_content_h = gtk::Box::new(gtk::Orientation::Horizontal, 0);
@@ -301,29 +399,35 @@ impl ViewportWidgetFactory {
             frame_content_v
         };
 
+        let swapchain = RefCell::new(None::<Swapchain>);
         offload.add_tick_callback(move |_, _| {
-            (|| {
-                let Some(dmabuf) = next_frame.take(atomic::Ordering::SeqCst) else {
-                    return;
-                };
-                let texture = match dmabuf.build_gdk_texture() {
-                    Ok(t) => t,
-                    Err(err) => {
-                        warn!("Failed to build GDK texture from dmabuf texture: {err:?}");
-                        return;
-                    }
-                };
+            if let Some(dmabuf) = next_dmabuf.take(atomic::Ordering::SeqCst) {
+                trace!("Downloading new dmabufs from GTK");
+                let (texture_a, texture_b) = (
+                    dmabuf
+                        .build_gdk_texture()
+                        .expect("failed to build dmabuf texture"),
+                    dmabuf
+                        .build_gdk_texture()
+                        .expect("failed to build dmabuf texture"),
+                );
+                swapchain.replace(Some(Swapchain {
+                    _dmabuf: *dmabuf,
+                    texture_a,
+                    texture_b,
+                }));
+            }
 
-                picture.set_paintable(Some(&texture));
-            })();
+            if let Some(swapchain) = &mut *swapchain.borrow_mut() {
+                picture.set_paintable(Some(&swapchain.texture_a));
+                mem::swap(&mut swapchain.texture_a, &mut swapchain.texture_b);
+            }
+
             glib::ControlFlow::Continue
         });
 
         let widget_alive = Cell::new(Some(widget_alive));
-        offload.connect_destroy(move |_| {
-            // signal that the original texture is now safe to drop
-            drop(widget_alive.take());
-        });
+        offload.connect_destroy(move |_| drop(widget_alive.take()));
 
         container.upcast()
     }

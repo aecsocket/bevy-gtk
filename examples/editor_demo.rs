@@ -4,7 +4,7 @@ use {
     bevy_gtk::{GtkInitPlugin, GtkPlugin, NewWindowContent, render::GtkViewports},
 };
 
-const APP_ID: &str = "io.github.aecsocket.bevy_gtk";
+const APP_ID: &str = "io.github.aecsocket.BevyGtk";
 
 fn main() -> AppExit {
     App::new()
