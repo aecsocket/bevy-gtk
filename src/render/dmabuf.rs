@@ -246,8 +246,6 @@ fn create_dmabuf_texture(
         }
         .push_next(&mut with_drm_format_modifier)
         .push_next(&mut with_external_memory);
-
-        println!("w/h = {width}/{height}");
         unsafe { vk_device.create_image(&params, None) }?
     };
 
