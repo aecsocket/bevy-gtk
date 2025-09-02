@@ -7,7 +7,7 @@ charset = utf-8
 trim_trailing_whitespace = true
 indent_style = space
 
-[*.{json,yml,yaml,toml,nix}]
+[*.{json,yml,yaml,toml,nix,blp}]
 indent_size = 2
 
 [justfile]

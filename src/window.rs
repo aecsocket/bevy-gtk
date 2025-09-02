@@ -168,8 +168,10 @@ fn sync_one(use_adw: bool, bevy_window: &Window, proxy: &mut WindowProxy) {
         reason = "small numbers; truncation is fine"
     )]
     {
-        gtk_window.set_width_request(bevy_window.resolution.width() as i32);
-        gtk_window.set_height_request(bevy_window.resolution.height() as i32);
+        gtk_window.set_width_request(bevy_window.resize_constraints.min_width as i32);
+        gtk_window.set_height_request(bevy_window.resize_constraints.min_height as i32);
+        gtk_window.set_default_width(bevy_window.resolution.width() as i32);
+        gtk_window.set_default_height(bevy_window.resolution.height() as i32);
     }
 
     let rebuild_widgets = cmp_ex(&mut proxy.cache.titlebar_shown, bevy_window.titlebar_shown)

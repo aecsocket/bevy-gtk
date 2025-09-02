@@ -21,31 +21,35 @@ std_instead_of_alloc  = "warn"
 std_instead_of_core   = "warn"
 unwrap_used           = "warn"
 
+missing_const_for_fn    = "allow"
 module_name_repetitions = "allow"
 needless_pass_by_value  = "allow"
+option_if_let_else      = "allow"
 similar_names           = "allow"
 too_many_arguments      = "allow"
 type_complexity         = "allow"
-option_if_let_else         = "allow"
-missing_const_for_fn         = "allow"
-
+missing_errors_doc      = "allow"
+missing_panics_doc      = "allow"
 
 [features]
 default = ["render"]
 
-adwaita = ["dep:libadwaita"]
+adwaita = ["dep:adw"]
 render = [
   "bevy_render/raw_vulkan_init",
   "dep:ash",
+  "dep:bevy_asset",
+  "dep:bevy_camera",
+  "dep:bevy_image",
   "dep:bevy_render",
   "dep:drm-fourcc",
   "dep:wgpu",
   "dep:wgpu-hal",
 ]
+blueprint = ["gtk/blueprint"]
 
 [dependencies]
 bevy_app = { version = "0.17.0-dev", default-features = false }
-bevy_derive = { version = "0.17.0-dev", default-features = false }
 bevy_ecs = { version = "0.17.0-dev", default-features = false }
 bevy_platform = { version = "0.17.0-dev", default-features = false, features = [
   "alloc",
@@ -54,31 +58,40 @@ bevy_utils = { version = "0.17.0-dev", default-features = false }
 bevy_window = { version = "0.17.0-dev", default-features = false }
 
 async-channel = { version = "2.5" }
-gdk4          = { version = "0.10", features = ["v4_14"] }
+gdk           = { package = "gdk4", version = "0.10", features = ["v4_14"] }
 gio           = { version = "0.21" }
 glib          = { version = "0.21" }
-gtk4          = { version = "0.10", features = ["v4_16"] }
+gtk           = { package = "gtk4", version = "0.10", features = ["v4_16"] }
 log           = { version = "0.4" }
-oneshot = { version = "0.1"}
+oneshot       = { version = "0.1" }
+derive_more   = { version = "2.0", default-features = false, features = ["deref", "debug"] }
 
-ash         = { optional = true, version = "0.38", default-features = false }
+adw = { optional = true, package = "libadwaita", version = "0.8", features = [
+  "v1_6",
+] }
+ash = { optional = true, version = "0.38", default-features = false }
+bevy_asset = { optional = true, version = "0.17.0-dev", default-features = false }
+bevy_camera = { optional = true, version = "0.17.0-dev", default-features = false }
+bevy_image = { optional = true, version = "0.17.0-dev", default-features = false }
 bevy_render = { optional = true, version = "0.17.0-dev", default-features = false }
-drm-fourcc  = { optional = true, version = "2.2", default-features = false }
-libadwaita  = { optional = true, version = "0.8", features = ["v1_6"] }
-wgpu        = { optional = true, version = "26.0", default-features = false }
-wgpu-hal    = { optional = true, version = "26.0", default-features = false }
+drm-fourcc = { optional = true, version = "2.2", default-features = false }
+wgpu = { optional = true, version = "26.0", default-features = false }
+wgpu-hal = { optional = true, version = "26.0", default-features = false }
 
 [dev-dependencies]
 bevy     = { version = "0.17.0-dev", features = ["wayland"] }
-bevy_gtk = { path = ".", features = ["adwaita"] }
+bevy_gtk = { path = ".", features = ["adwaita", "blueprint"] }
 clap     = { version = "4.5", features = ["derive"] }
 
 [patch.crates-io]
-bevy = { git = "https://github.com/bevyengine/bevy", branch = "main" }
-bevy_app = { git = "https://github.com/bevyengine/bevy", branch = "main" }
-bevy_derive = { git = "https://github.com/bevyengine/bevy", branch = "main" }
-bevy_ecs = { git = "https://github.com/bevyengine/bevy", branch = "main" }
+bevy          = { git = "https://github.com/bevyengine/bevy", branch = "main" }
+bevy_app      = { git = "https://github.com/bevyengine/bevy", branch = "main" }
+bevy_asset    = { git = "https://github.com/bevyengine/bevy", branch = "main" }
+bevy_camera   = { git = "https://github.com/bevyengine/bevy", branch = "main" }
+bevy_derive   = { git = "https://github.com/bevyengine/bevy", branch = "main" }
+bevy_ecs      = { git = "https://github.com/bevyengine/bevy", branch = "main" }
+bevy_image    = { git = "https://github.com/bevyengine/bevy", branch = "main" }
 bevy_platform = { git = "https://github.com/bevyengine/bevy", branch = "main" }
-bevy_utils = { git = "https://github.com/bevyengine/bevy", branch = "main" }
-bevy_window = { git = "https://github.com/bevyengine/bevy", branch = "main" }
-bevy_render = { git = "https://github.com/bevyengine/bevy", branch = "main" }
+bevy_render   = { git = "https://github.com/bevyengine/bevy", branch = "main" }
+bevy_utils    = { git = "https://github.com/bevyengine/bevy", branch = "main" }
+bevy_window   = { git = "https://github.com/bevyengine/bevy", branch = "main" }

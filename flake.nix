@@ -44,7 +44,7 @@
           # GTK + Adwaita
           gtk4
           libadwaita
-          dbus
+          blueprint-compiler
         ] ++ lib.optionals (lib.strings.hasInfix "linux" system) [
           # Bevy
           alsa-lib
@@ -52,7 +52,6 @@
           vulkan-tools
           libudev-zero
           libxkbcommon
-          xdg-desktop-portal
         ];
         shellHook = ''
           export RUSTFLAGS="-Zcodegen-backend=cranelift"

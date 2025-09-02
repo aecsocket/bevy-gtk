@@ -1,37 +1,43 @@
 use {
-    crate::render::GtkRenderData,
     ash::vk,
-    bevy_derive::Deref,
     bevy_ecs::error::BevyError,
     bevy_utils::default,
+    derive_more::{Debug, Deref},
     drm_fourcc::{DrmFormat, DrmFourcc, DrmModifier},
     std::os::fd::{AsRawFd as _, FromRawFd, OwnedFd},
 };
 
 /// [`wgpu::Texture`] which is backed by Linux dmabuf memory.
-#[derive(Deref)]
+#[derive(Debug, Clone, Deref)]
 pub struct DmabufTexture {
+    #[debug(skip)]
     vk_instance: ash::Instance,
+    #[debug(skip)]
     vk_device: ash::Device,
     #[deref]
     wgpu_texture: wgpu::Texture,
+    #[debug(skip)]
     vk_memory: vk::DeviceMemory,
     drm_format: DrmFormat,
 }
 
-impl GtkRenderData {
+impl DmabufTexture {
     /// Creates a dmabuf-backed texture on a Vulkan [`wgpu::Device`].
-    pub fn create_dmabuf_texture(
-        &self,
+    pub fn new(
         device: &wgpu::Device,
         width: u32,
         height: u32,
         label: Option<&'static str>,
-    ) -> Result<DmabufTexture, BevyError> {
+    ) -> Result<Self, BevyError> {
         // SAFETY: `hal_device` is not manually destroyed by us
         let hal_device = unsafe { device.as_hal::<wgpu_hal::vulkan::Api>() }
             .expect("render device is not a Vulkan device");
         create_dmabuf_texture(device, &hal_device, label, width, height)
+    }
+
+    #[must_use]
+    pub fn wgpu_texture(&self) -> &wgpu::Texture {
+        &self.wgpu_texture
     }
 }
 
@@ -138,17 +144,16 @@ fn create_dmabuf_texture(
         let plane_layouts = [vk::SubresourceLayout {
             offset: 0,
             size: 0,
-            row_pitch: width as u64 * size_of::<u32>() as u64,
+            row_pitch: u64::from(width) * u64::from(u32::BITS / 8),
             array_pitch: 0,
             depth_pitch: 0,
         }];
         let mut with_drm_format_modifier = vk::ImageDrmFormatModifierExplicitCreateInfoEXT {
             drm_format_modifier: drm_modifier.into(),
             drm_format_modifier_plane_count: DRM_MODIFIER_PLANE_COUNT,
-            p_plane_layouts: &plane_layouts as *const _,
+            p_plane_layouts: (&raw const plane_layouts).cast(),
             ..default()
         };
-
         let params = vk::ImageCreateInfo {
             image_type: VK_DIM,
             format: vk_format,
@@ -395,7 +400,7 @@ impl DmabufTexture {
         let builder = unsafe { builder.set_fd(0, fd.as_raw_fd()) }
             .set_offset(0, 0)
             // <https://docs.kernel.org/userspace-api/dma-buf-alloc-exchange.html#term-stride>
-            .set_stride(0, width * size_of::<u32>() as u32);
+            .set_stride(0, width * u32::BITS / 8);
 
         // SAFETY: I have no clue what the invariants are.
         let gdk_texture = unsafe { builder.build_with_release_func(move || drop(fd))? };

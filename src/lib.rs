@@ -1,9 +1,4 @@
 extern crate alloc;
-extern crate gdk4 as gdk;
-extern crate gio;
-extern crate gtk4 as gtk;
-#[cfg(feature = "adwaita")]
-extern crate libadwaita as adw;
 
 macro_rules! if_adw {
     ($with_adw:expr, $without_adw:expr $(,)?) => {{
@@ -31,19 +26,30 @@ macro_rules! if_adw {
 use {
     alloc::rc::Rc,
     bevy_app::{PluginsState, prelude::*},
-    bevy_derive::Deref,
     bevy_ecs::prelude::*,
     core::cell::{Cell, RefCell},
+    derive_more::Deref,
     glib::clone,
     gtk::prelude::*,
     log::debug,
 };
 
 mod window;
-pub use window::*;
+#[cfg(feature = "adwaita")]
+pub use adw;
+pub use {gdk, gio, gtk, window::*};
 
 #[cfg(feature = "render")]
 pub mod render;
+
+pub struct GtkInitPlugin;
+
+impl Plugin for GtkInitPlugin {
+    fn build(&self, app: &mut App) {
+        #[cfg(feature = "render")]
+        render::init_plugin(app);
+    }
+}
 
 #[derive(Default)]
 pub struct GtkPlugin {
@@ -51,9 +57,6 @@ pub struct GtkPlugin {
     pub app_id: Option<String>,
     pub app_flags: gio::ApplicationFlags,
 }
-
-#[derive(Debug, Clone, Deref)]
-pub struct GtkApplication(pub gtk::Application);
 
 impl GtkPlugin {
     pub fn new(app_id: impl Into<String>) -> Self {
@@ -81,8 +84,14 @@ impl GtkPlugin {
     }
 }
 
+#[derive(Debug, Clone, Deref)]
+pub struct GtkApplication(pub gtk::Application);
+
 impl Plugin for GtkPlugin {
     fn build(&self, app: &mut App) {
+        #[cfg(feature = "render")]
+        render::plugin(app);
+
         let gtk_app = if_adw!(
             self.use_adw,
             adw::Application::new(self.app_id.as_deref(), self.app_flags)

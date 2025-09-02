@@ -3,16 +3,14 @@ use {
         camera::{ManualTextureViewHandle, RenderTarget},
         prelude::*,
         render::renderer::RenderDevice,
+        window::{WindowRef, WindowResolution},
         winit::WinitPlugin,
     },
     bevy_gtk::{
         GtkPlugin, NewWindowContent,
-        render::{GtkRenderData, GtkRenderPlugin},
+        render::{DmabufTexture, GtkRenderData, GtkRenderPlugin},
     },
-    bevy_render::texture::ManualTextureView,
-    bevy_window::{PrimaryWindow, WindowRef, WindowResolution},
-    gtk4::prelude::*,
-    std::{cell::RefCell, sync::Mutex},
+    std::sync::Mutex,
     wgpu::TextureViewDescriptor,
 };
 
@@ -130,9 +128,7 @@ fn setup(
 
     // camera
     let (width, height) = (512, 512);
-    let fb = gtk_render_data
-        .create_dmabuf_texture(render_device.wgpu_device(), width, height, None)
-        .unwrap();
+    let fb = DmabufTexture::new(render_device.wgpu_device(), width, height, None).unwrap();
     let fb_view = fb.create_view(&TextureViewDescriptor::default());
     let manual_texture_view = ManualTextureViewHandle(0);
     manual_texture_views.insert(
@@ -143,6 +139,8 @@ fn setup(
             format: fb.format(),
         },
     );
+
+    let (viewport, viewport_widget) = GtkViewport::new();
 
     commands.spawn((
         Camera {
@@ -155,34 +153,7 @@ fn setup(
 
     commands
         .entity(*window)
-        .insert(NewWindowContent::from(move || {
-            let fb_gdk = fb.build_gdk_texture().unwrap();
-            let fb_picture = gtk4::Picture::for_paintable(&fb_gdk);
-            let fb_offload = gtk4::GraphicsOffload::builder()
-                .black_background(true)
-                .child(&fb_picture)
-                .hexpand(true)
-                .vexpand(true)
-                .build();
-
-            let fb = RefCell::new(Some(fb));
-            fb_offload.add_tick_callback(move |_, clock| {
-                if clock.frame_counter() % 2 == 0 {
-                    // fb_picture.set_paintable(None::<&gdk4::Paintable>);
-                } else {
-                    fb_picture.set_paintable(Some(&fb_gdk));
-                }
-
-                // if clock.frame_counter() > 10 && fb.take().is_some() {
-                //     println!("dropped @ {}", clock.frame_counter());
-                //     *DROPPED.lock().unwrap() = true;
-                // }
-
-                glib::ControlFlow::Continue
-            });
-
-            fb_offload
-        }));
+        .insert(NewWindowContent::from(move || viewport_widget.make()));
 }
 
 fn rotate_cube(time: Res<Time>, mut query: Query<&mut Transform, With<Rotating>>) {

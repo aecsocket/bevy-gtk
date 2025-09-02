@@ -8,27 +8,24 @@ use {
 };
 
 mod dmabuf;
-pub use dmabuf::*;
+mod viewport;
+pub use {dmabuf::*, viewport::*};
 
-pub struct GtkRenderPlugin;
+pub(super) fn init_plugin(app: &mut App) {
+    let mut raw_vulkan_settings = app
+        .world_mut()
+        .get_resource_or_init::<RawVulkanInitSettings>();
 
-impl Plugin for GtkRenderPlugin {
-    fn build(&self, app: &mut App) {
-        let mut raw_vulkan_settings = app
-            .world_mut()
-            .get_resource_or_init::<RawVulkanInitSettings>();
-
-        // SAFETY: we do not remove any features or functionality
-        unsafe {
-            raw_vulkan_settings.add_create_device_callback(|args, _, _| {
-                args.extensions.extend_from_slice(&[
-                    ash::khr::external_memory::NAME,
-                    ash::khr::external_memory_fd::NAME,
-                    ash::ext::image_drm_format_modifier::NAME,
-                    ash::ext::external_memory_dma_buf::NAME,
-                ]);
-            });
-        }
+    // SAFETY: we do not remove any features or functionality
+    unsafe {
+        raw_vulkan_settings.add_create_device_callback(|args, _, _| {
+            args.extensions.extend_from_slice(&[
+                ash::khr::external_memory::NAME,
+                ash::khr::external_memory_fd::NAME,
+                ash::ext::image_drm_format_modifier::NAME,
+                ash::ext::external_memory_dma_buf::NAME,
+            ]);
+        });
     }
 }
 
@@ -44,7 +41,11 @@ impl GtkRenderData {
     }
 }
 
-pub(crate) fn post_activate(app: &mut App) {
+pub(super) fn plugin(app: &mut App) {
+    viewport::plugin(app);
+}
+
+pub(super) fn post_activate(app: &mut App) {
     let dmabuf_formats = gdk::Display::default()
         .expect("failed to get GDK display")
         .dmabuf_formats();

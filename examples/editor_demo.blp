@@ -1,0 +1,82 @@
+using Gtk 4.0;
+using Adw 1;
+
+template $EditorDemo: Adw.Bin {
+  Adw.ToolbarView {
+    hexpand: true;
+    bottom-bar-style: raised;
+
+    [top]
+    Adw.HeaderBar {
+      title-widget: Entry {
+        hexpand: true;
+        placeholder-text: _("Search...");
+      };
+
+      [start]
+      ToggleButton show_sidebar {
+        icon-name: "open-menu-symbolic";
+        active: true;
+      }
+    }
+
+    Adw.OverlaySplitView {
+      show-sidebar: bind show_sidebar.active bidirectional;
+
+      sidebar: Adw.ToolbarView {
+        [top]
+        Adw.HeaderBar {
+          title-widget: Adw.ViewSwitcher {
+            stack: sidebar_stack;
+            policy: narrow;
+          };
+        }
+
+        Adw.ViewStack sidebar_stack {
+          Adw.ViewStackPage {
+            name: "entities";
+            title: _("Entities");
+            icon-name: "emoji-objects-symbolic";
+            child: Adw.StatusPage {
+              description: _("Entities here");
+            };
+          }
+
+          Adw.ViewStackPage {
+            name: "resources";
+            title: _("Resources");
+            icon-name: "folder-documents-symbolic";
+            child: Adw.StatusPage {
+              description: _("Resources here");
+            };
+          }
+
+          Adw.ViewStackPage {
+            name: "assets";
+            title: _("Assets");
+            icon-name: "folder-pictures-symbolic";
+            child: Adw.StatusPage {
+              description: _("Assets here");
+            };
+          }
+        }
+      };
+
+      Box {
+        orientation: horizontal;
+        hexpand: true;
+        vexpand: true;
+
+        Adw.Bin bevy_content_left {
+          hexpand: true;
+          vexpand: true;
+        }
+
+        Adw.Bin bevy_content_right {
+          hexpand: true;
+          vexpand: true;
+        }
+      }
+    }
+  }
+}

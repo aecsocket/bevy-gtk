@@ -1,9 +1,7 @@
 use {
     gio::prelude::{ApplicationExt, ApplicationExtManual},
-    gtk4::prelude::GtkWindowExt,
+    gtk::prelude::GtkWindowExt,
 };
-
-extern crate libadwaita as adw;
 
 fn main() {
     let app = adw::Application::builder().build();
