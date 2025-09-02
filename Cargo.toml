@@ -27,10 +27,10 @@ missing_panics_doc      = "allow"
 module_name_repetitions = "allow"
 needless_pass_by_value  = "allow"
 option_if_let_else      = "allow"
+redundant_pub_crate     = "allow"
 similar_names           = "allow"
 too_many_arguments      = "allow"
 type_complexity         = "allow"
-redundant_pub_crate     = "allow"
 
 [features]
 default = ["render"]
@@ -40,10 +40,12 @@ blueprint = ["gtk/blueprint"]
 render = [
   "bevy_render/raw_vulkan_init",
   "dep:ash",
+  "dep:atomic_float",
   "dep:atomicbox",
   "dep:bevy_asset",
   "dep:bevy_camera",
   "dep:bevy_image",
+  "dep:bevy_math",
   "dep:bevy_render",
   "dep:drm-fourcc",
   "dep:wgpu",
@@ -71,15 +73,17 @@ gtk = { package = "gtk4", version = "0.10", features = ["v4_16"] }
 log = { version = "0.4" }
 oneshot = { version = "0.1" }
 
-ash         = { optional = true, version = "0.38", default-features = false }
-atomicbox   = { optional = true, version = "0.4" }
-bevy_asset  = { optional = true, version = "0.17.0-dev", default-features = false }
-bevy_camera = { optional = true, version = "0.17.0-dev", default-features = false }
-bevy_image  = { optional = true, version = "0.17.0-dev", default-features = false }
-bevy_render = { optional = true, version = "0.17.0-dev", default-features = false }
-drm-fourcc  = { optional = true, version = "2.2", default-features = false }
-wgpu        = { optional = true, version = "26.0", default-features = false }
-wgpu-hal    = { optional = true, version = "26.0", default-features = false }
+ash          = { optional = true, version = "0.38", default-features = false }
+atomic_float = { optional = true, version = "1.1" }
+atomicbox    = { optional = true, version = "0.4" }
+bevy_asset   = { optional = true, version = "0.17.0-dev", default-features = false }
+bevy_camera  = { optional = true, version = "0.17.0-dev", default-features = false }
+bevy_image   = { optional = true, version = "0.17.0-dev", default-features = false }
+bevy_math    = { optional = true, version = "0.17.0-dev", default-features = false }
+bevy_render  = { optional = true, version = "0.17.0-dev", default-features = false }
+drm-fourcc   = { optional = true, version = "2.2", default-features = false }
+wgpu         = { optional = true, version = "26.0", default-features = false }
+wgpu-hal     = { optional = true, version = "26.0", default-features = false }
 
 adw = { optional = true, package = "libadwaita", version = "0.8", features = [
   "v1_6",
@@ -98,6 +102,7 @@ bevy_camera   = { git = "https://github.com/bevyengine/bevy", branch = "main" }
 bevy_derive   = { git = "https://github.com/bevyengine/bevy", branch = "main" }
 bevy_ecs      = { git = "https://github.com/bevyengine/bevy", branch = "main" }
 bevy_image    = { git = "https://github.com/bevyengine/bevy", branch = "main" }
+bevy_math     = { git = "https://github.com/bevyengine/bevy", branch = "main" }
 bevy_platform = { git = "https://github.com/bevyengine/bevy", branch = "main" }
 bevy_render   = { git = "https://github.com/bevyengine/bevy", branch = "main" }
 bevy_utils    = { git = "https://github.com/bevyengine/bevy", branch = "main" }

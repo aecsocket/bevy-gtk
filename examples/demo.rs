@@ -1,9 +1,9 @@
 use {
-    bevy::{camera::RenderTarget, prelude::*, window::PrimaryWindow, winit::WinitPlugin},
+    bevy::{prelude::*, window::PrimaryWindow, winit::WinitPlugin},
     bevy_gtk::{GtkInitPlugin, GtkPlugin, NewWindowContent, render::GtkViewports},
 };
 
-#[derive(Debug, clap::Parser)]
+#[derive(Debug, Resource, clap::Parser)]
 #[allow(clippy::struct_excessive_bools, reason = "`clap` args")]
 struct Args {
     #[arg(long, value_enum, default_value_t = DemoMode::Adw)]
@@ -50,17 +50,22 @@ fn main() -> AppExit {
     });
     match args.mode {
         DemoMode::Winit => app.add_plugins(default_plugins),
-        DemoMode::Gtk => app.add_plugins((
-            GtkInitPlugin,
-            default_plugins.build().disable::<WinitPlugin>(),
-            GtkPlugin::new(APP_ID).without_adw(),
-        )),
-        DemoMode::Adw => app.add_plugins((
-            GtkInitPlugin,
-            default_plugins.build().disable::<WinitPlugin>(),
-            GtkPlugin::new(APP_ID).with_adw(),
-        )),
+        DemoMode::Gtk => app
+            .add_plugins((
+                GtkInitPlugin,
+                default_plugins.build().disable::<WinitPlugin>(),
+                GtkPlugin::new(APP_ID).without_adw(),
+            ))
+            .add_systems(Startup, setup_gtk.after(setup)),
+        DemoMode::Adw => app
+            .add_plugins((
+                GtkInitPlugin,
+                default_plugins.build().disable::<WinitPlugin>(),
+                GtkPlugin::new(APP_ID).with_adw(),
+            ))
+            .add_systems(Startup, setup_gtk.after(setup)),
     };
+
     app.add_systems(Startup, setup)
         .add_systems(Update, rotate_cube)
         .run()
@@ -73,8 +78,6 @@ fn setup(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    mut viewports: GtkViewports,
-    window: Single<Entity, With<PrimaryWindow>>,
 ) {
     // circular base
     commands.spawn((
@@ -97,19 +100,21 @@ fn setup(
         },
         Transform::from_xyz(4.0, 8.0, 4.0),
     ));
-
     // camera
-    let (image, widget_factory) = viewports.create();
-
     commands.spawn((
-        Camera {
-            target: RenderTarget::Image(image.into()),
-            ..default()
-        },
         Camera3d::default(),
         Transform::from_xyz(-2.5, 4.5, 9.0).looking_at(Vec3::ZERO, Vec3::Y),
     ));
+}
 
+fn setup_gtk(
+    mut commands: Commands,
+    mut viewports: GtkViewports,
+    camera: Single<Entity, With<Camera>>,
+    window: Single<Entity, With<PrimaryWindow>>,
+) {
+    let (viewport, widget_factory) = viewports.create();
+    commands.entity(*camera).insert(viewport);
     commands
         .entity(*window)
         .insert(NewWindowContent::from(move || widget_factory.make()));

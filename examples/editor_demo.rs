@@ -1,6 +1,6 @@
 use {
     adw::prelude::*,
-    bevy::{camera::RenderTarget, prelude::*, window::PrimaryWindow, winit::WinitPlugin},
+    bevy::{prelude::*, window::PrimaryWindow, winit::WinitPlugin},
     bevy_gtk::{GtkInitPlugin, GtkPlugin, NewWindowContent, render::GtkViewports},
 };
 
@@ -77,23 +77,17 @@ fn setup_cameras(
     window: Single<Entity, With<PrimaryWindow>>,
     mut viewports: GtkViewports,
 ) {
-    let (left_image, left_widget_factory) = viewports.create();
-    let (right_image, right_widget_factory) = viewports.create();
+    let (left_viewport, left_widget_factory) = viewports.create();
+    let (right_viewport, right_widget_factory) = viewports.create();
 
     commands.spawn((
-        Camera {
-            target: RenderTarget::Image(left_image.into()),
-            ..default()
-        },
         Camera3d::default(),
+        left_viewport,
         Transform::from_xyz(-2.5, 4.5, 9.0).looking_at(Vec3::ZERO, Vec3::Y),
     ));
     commands.spawn((
-        Camera {
-            target: RenderTarget::Image(right_image.into()),
-            ..default()
-        },
         Camera3d::default(),
+        right_viewport,
         Transform::from_xyz(0.5, 4.5, 2.0).looking_at(Vec3::ZERO, Vec3::Y),
     ));
 
