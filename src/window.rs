@@ -1,5 +1,6 @@
 use {
     crate::GtkApplication,
+    bevy_app::prelude::*,
     bevy_ecs::prelude::*,
     bevy_platform::collections::{HashMap, hash_map::Entry},
     bevy_window::{
@@ -9,6 +10,19 @@ use {
     gtk::prelude::*,
     log::info,
 };
+
+pub(super) fn plugin(app: &mut App) {
+    app.add_systems(
+        Last,
+        (
+            create_bevy_to_gtk,
+            despawn,
+            sync_bevy_to_gtk,
+            sync_gtk_to_bevy,
+        )
+            .chain(),
+    );
+}
 
 #[derive(Debug)]
 pub struct GtkWindows {
@@ -75,7 +89,7 @@ where
     }
 }
 
-pub fn create_bevy_to_gtk(
+pub(super) fn create_bevy_to_gtk(
     new_windows: Query<(Entity, &mut Window), Added<Window>>,
     mut gtk_windows: NonSendMut<GtkWindows>,
     gtk_app: NonSend<GtkApplication>,
@@ -162,7 +176,6 @@ fn sync_one(use_adw: bool, bevy_window: &Window, proxy: &mut WindowProxy) {
     let gtk_window = &proxy.gtk;
     gtk_window.set_title(Some(&bevy_window.title));
 
-    // logical pixels, so casting is fine
     #[expect(
         clippy::cast_possible_truncation,
         reason = "small numbers; truncation is fine"

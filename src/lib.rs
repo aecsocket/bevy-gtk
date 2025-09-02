@@ -26,7 +26,6 @@ macro_rules! if_adw {
 use {
     alloc::rc::Rc,
     bevy_app::{PluginsState, prelude::*},
-    bevy_ecs::prelude::*,
     core::cell::{Cell, RefCell},
     derive_more::Deref,
     glib::clone,
@@ -173,20 +172,11 @@ impl Plugin for GtkPlugin {
         #[cfg(feature = "render")]
         render::post_activate(app);
 
-        app.insert_non_send_resource(app_hold)
+        app.add_plugins(window::plugin)
+            .insert_non_send_resource(app_hold)
             .insert_non_send_resource(GtkApplication(gtk_app.clone()))
             .insert_non_send_resource(GtkWindows::new(self.use_adw))
-            .set_runner(|bevy_app| gtk_runner(bevy_app, gtk_app))
-            .add_systems(
-                Last,
-                (
-                    window::create_bevy_to_gtk,
-                    window::despawn,
-                    window::sync_bevy_to_gtk,
-                    window::sync_gtk_to_bevy,
-                )
-                    .chain(),
-            );
+            .set_runner(|bevy_app| gtk_runner(bevy_app, gtk_app));
     }
 }
 

@@ -73,6 +73,13 @@ impl DmabufTexture {
         Ok(unsafe { OwnedFd::from_raw_fd(raw_fd) })
     }
 
+    /// Builds a [`gdk::Texture`] backed by a file descriptor to this DMA
+    /// buffer.
+    ///
+    /// # Errors
+    ///
+    /// Errors if [`DmabufTexture::open_fd`] or building the
+    /// [`gdk::DmabufTexture`] fail.
     pub fn build_gdk_texture(&self) -> Result<gdk::Texture, BevyError> {
         let fd = self.open_fd()?;
         let (width, height) = (self.width(), self.height());
@@ -90,7 +97,7 @@ impl DmabufTexture {
             .set_offset(0, 0)
             .set_stride(0, self.stride);
 
-        // SAFETY: I have no clue what the invariants are.
+        // SAFETY: I have no clue what the safety invariants are.
         let gdk_texture = unsafe { builder.build_with_release_func(move || drop(fd))? };
         Ok(gdk_texture)
     }

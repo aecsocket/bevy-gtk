@@ -65,12 +65,6 @@ use {
     wgpu::{Extent3d, TextureDimension, TextureFormat, TextureUsages, TextureViewDescriptor},
 };
 
-#[derive(SystemParam)]
-pub struct GtkViewports<'w, 's> {
-    images: ResMut<'w, Assets<Image>>,
-    commands: Commands<'w, 's>,
-}
-
 pub(super) fn plugin(app: &mut App) {
     app.add_plugins(ExtractComponentPlugin::<RenderViewport>::default())
         .add_systems(PostStartup, update_images.before(CameraUpdateSystems))
@@ -138,7 +132,11 @@ struct RenderViewport {
 
 // creation logic
 
-const TEXTURE_FORMAT: TextureFormat = TextureFormat::Rgba8UnormSrgb;
+#[derive(SystemParam)]
+pub struct GtkViewports<'w, 's> {
+    images: ResMut<'w, Assets<Image>>,
+    commands: Commands<'w, 's>,
+}
 
 impl GtkViewports<'_, '_> {
     pub fn create(&mut self) -> (Handle<Image>, WidgetFactory) {
@@ -191,6 +189,8 @@ impl ExtractComponent for RenderViewport {
 }
 
 // frame-to-frame rendering logic, in the main world
+
+const TEXTURE_FORMAT: TextureFormat = TextureFormat::Rgba8UnormSrgb;
 
 fn update_images(mut viewports: Query<&mut Viewport>, mut images: ResMut<Assets<Image>>) {
     for mut viewport in &mut viewports {
@@ -323,8 +323,6 @@ impl WidgetFactory {
     pub fn make(self) -> gtk::Widget {
         #[derive(Debug)]
         struct Swapchain {
-            // keep the dmabuf alive until we get a new texture
-            _dmabuf: DmabufTexture,
             // these aren't `front` and `back` buffers,
             // because their role constantly swaps
             texture_a: gdk::Texture,
@@ -413,7 +411,6 @@ impl WidgetFactory {
                         .expect("failed to build dmabuf texture"),
                 );
                 swapchain.replace(Some(Swapchain {
-                    _dmabuf: *dmabuf,
                     texture_a,
                     texture_b,
                 }));
