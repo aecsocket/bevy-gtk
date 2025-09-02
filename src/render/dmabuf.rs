@@ -31,7 +31,6 @@ impl DmabufTexture {
         width: u32,
         height: u32,
         format: wgpu::TextureFormat,
-        label: Option<&'static str>,
     ) -> Result<Self, BevyError> {
         // SAFETY: `hal_adapter` is not manually destroyed by us
         let hal_adapter = unsafe { adapter.as_hal::<wgpu_hal::vulkan::Api>() }
@@ -39,15 +38,7 @@ impl DmabufTexture {
         // SAFETY: `hal_device` is not manually destroyed by us
         let hal_device = unsafe { device.as_hal::<wgpu_hal::vulkan::Api>() }
             .expect("render device is not a Vulkan device");
-        create_dmabuf_texture(
-            &hal_adapter,
-            device,
-            &hal_device,
-            width,
-            height,
-            format,
-            label,
-        )
+        create_dmabuf_texture(&hal_adapter, device, &hal_device, width, height, format)
     }
 
     #[must_use]
@@ -115,7 +106,6 @@ fn create_dmabuf_texture(
     width: u32,
     height: u32,
     wgpu_format: wgpu::TextureFormat,
-    label: Option<&'static str>,
 ) -> Result<DmabufTexture, BevyError> {
     // Renderdoc doesn't support capturing processes which export memory.
     // As of renderdoc v1.39, [`ash::ext::image_drm_format_modifier::NAME`] is
@@ -124,6 +114,7 @@ fn create_dmabuf_texture(
     // `vk::ImageTiling::DRM_FORMAT_MODIFIER_EXT`, but I think this is less
     // correct.
 
+    const LABEL: &str = "bevy_gtk dmabuf texture";
     const DRM_MODIFIER_PLANE_COUNT: u32 = 1;
     const VK_DIM: vk::ImageType = vk::ImageType::TYPE_2D;
     const WGPU_DIM: wgpu::TextureDimension = wgpu::TextureDimension::D2;
@@ -300,7 +291,7 @@ fn create_dmabuf_texture(
 
     let hal_texture = {
         let descriptor_hal = wgpu_hal::TextureDescriptor {
-            label,
+            label: Some(LABEL),
             size: wgpu::Extent3d {
                 width,
                 height,
@@ -333,7 +324,7 @@ fn create_dmabuf_texture(
         wgpu_device.create_texture_from_hal::<wgpu_hal::vulkan::Api>(
             hal_texture,
             &wgpu::TextureDescriptor {
-                label,
+                label: Some(LABEL),
                 size: wgpu::Extent3d {
                     width,
                     height,

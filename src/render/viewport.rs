@@ -20,22 +20,21 @@
 //!
 //! The widget is responsible for:
 //! - reading its own width and height, and sending that to the Bevy app
-//! - receiving [`DmabufTexture`]s from the app, downloading them
+//! - receiving [`DmabufTexture`]s from the app, making [`gdk::Texture`]s out of
+//!   them, and rendering them to the GTK app
 //!
-//! We implement our own swapchain via a front and back buffer. Bevy only ever
-//! writes into the back buffer - this includes texture creation (when the
-//! backing widget is resized), and actual rendering. Then once we've rendered
-//! into the back buffer, we swap the buffers and pass a copy of the (now) front
-//! buffer to the GTK app.
-
-// architecture v2:
-//! Here are the core limitations:
-//! - We have a Bevy app which can push frames at X frames/sec
-//! - We have a GTK app which can consume frames at Y frames/sec
-//! - X and Y may not be the same
-//! - GTK must
+//! GTK land effectively acts as our front buffer, and Bevy as our back buffer;
+//! swapping buffers is implicit, by sending the rendered Bevy back buffer to
+//! GTK. Bevy deals with dmabufs and wgpu textures, and GTK deals with dmabufs
+//! and GDK textures; the dmabuf is the communication medium between the two.
 //!
-//! wait...
+//! # Issues
+//!
+//! The main world and render world viewports keep track of `old_widget_size`
+//! separately. This isn't a dealbreaker, as they will eventually converge to
+//! the same image size, but it is possible (and common) that for maybe 1 or 2
+//! frames, the main world image size and render world wgpu texture will be
+//! different sizes.
 
 use {
     crate::render::DmabufTexture,
@@ -266,7 +265,6 @@ fn set_target_images(
                 tex_width,
                 tex_height,
                 TEXTURE_FORMAT,
-                None,
             )
             .expect("failed to create dmabuf texture");
 
