@@ -348,6 +348,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "atomicbox"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8a9a3820bc9e9aaf60c8389c2a4808548599f4ff254ce6bdb608ac3631d4ad76"
+
+[[package]]
 name = "atomicow"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -791,6 +797,7 @@ version = "0.1.0"
 dependencies = [
  "ash",
  "async-channel",
+ "atomicbox",
  "bevy",
  "bevy_app",
  "bevy_asset",

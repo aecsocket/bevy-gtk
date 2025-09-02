@@ -10,6 +10,7 @@ use {
         GtkPlugin, NewWindowContent,
         render::{DmabufTexture, GtkRenderData, GtkRenderPlugin},
     },
+    bevy_render::renderer::RenderAdapter,
     std::sync::Mutex,
     wgpu::TextureViewDescriptor,
 };
@@ -100,6 +101,7 @@ fn setup(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut manual_texture_views: ResMut<ManualTextureViews>,
+    render_adapter: Res<RenderAdapter>,
     render_device: Res<RenderDevice>,
     gtk_render_data: Res<GtkRenderData>,
     window: Single<Entity, With<PrimaryWindow>>,
@@ -128,7 +130,14 @@ fn setup(
 
     // camera
     let (width, height) = (512, 512);
-    let fb = DmabufTexture::new(render_device.wgpu_device(), width, height, None).unwrap();
+    let fb = DmabufTexture::new(
+        &render_adapter.0,
+        render_device.wgpu_device(),
+        width,
+        height,
+        None,
+    )
+    .unwrap();
     let fb_view = fb.create_view(&TextureViewDescriptor::default());
     let manual_texture_view = ManualTextureViewHandle(0);
     manual_texture_views.insert(

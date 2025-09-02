@@ -1,7 +1,7 @@
 use {
     adw::prelude::*,
     bevy::{camera::RenderTarget, prelude::*, window::PrimaryWindow, winit::WinitPlugin},
-    bevy_gtk::{GtkInitPlugin, GtkPlugin, NewWindowContent, render::Viewports},
+    bevy_gtk::{GtkInitPlugin, GtkPlugin, NewWindowContent, render::GtkViewports},
 };
 
 const APP_ID: &str = "io.github.aecsocket.bevy_gtk";
@@ -75,7 +75,7 @@ fn rotate_cube(time: Res<Time>, mut query: Query<&mut Transform, With<Rotating>>
 fn setup_cameras(
     mut commands: Commands,
     window: Single<Entity, With<PrimaryWindow>>,
-    mut viewports: Viewports,
+    mut viewports: GtkViewports,
 ) {
     let (left_image, left_viewport_factory) = viewports.create();
     let (right_image, right_viewport_factory) = viewports.create();

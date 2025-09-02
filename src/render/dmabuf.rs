@@ -19,25 +19,90 @@ pub struct DmabufTexture {
     #[debug(skip)]
     vk_memory: vk::DeviceMemory,
     drm_format: DrmFormat,
+    // <https://docs.kernel.org/userspace-api/dma-buf-alloc-exchange.html#term-stride>
+    stride: u32,
 }
 
 impl DmabufTexture {
     /// Creates a dmabuf-backed texture on a Vulkan [`wgpu::Device`].
     pub fn new(
+        adapter: &wgpu::Adapter,
         device: &wgpu::Device,
         width: u32,
         height: u32,
+        format: wgpu::TextureFormat,
         label: Option<&'static str>,
     ) -> Result<Self, BevyError> {
+        // SAFETY: `hal_adapter` is not manually destroyed by us
+        let hal_adapter = unsafe { adapter.as_hal::<wgpu_hal::vulkan::Api>() }
+            .expect("render adapter is not a Vulkan adapter");
         // SAFETY: `hal_device` is not manually destroyed by us
         let hal_device = unsafe { device.as_hal::<wgpu_hal::vulkan::Api>() }
             .expect("render device is not a Vulkan device");
-        create_dmabuf_texture(device, &hal_device, label, width, height)
+        create_dmabuf_texture(
+            adapter,
+            &hal_adapter,
+            device,
+            &hal_device,
+            width,
+            height,
+            format,
+            label,
+        )
     }
 
     #[must_use]
     pub fn wgpu_texture(&self) -> &wgpu::Texture {
         &self.wgpu_texture
+    }
+
+    /// Opens a new file descriptor to the underlying dmabuf memory.
+    ///
+    /// The file descriptor (and therefore reference to the underlying dmabuf/
+    /// device memory) is owned by the caller. If the texture is dropped before
+    /// the file descriptor, the memory will stay allocated.
+    ///
+    /// # Errors
+    ///
+    /// See <https://registry.khronos.org/vulkan/specs/latest/man/html/vkGetMemoryFdKHR.html>.
+    pub fn open_fd(&self) -> Result<OwnedFd, BevyError> {
+        let get_fd_info = vk::MemoryGetFdInfoKHR {
+            memory: self.vk_memory,
+            handle_type: MEMORY_HANDLE_TYPE,
+            ..default()
+        };
+        let raw_fd = unsafe {
+            ash::khr::external_memory_fd::Device::new(&self.vk_instance, &self.vk_device)
+                .get_memory_fd(&get_fd_info)
+        }?;
+        // SAFETY: Vulkan just created a new open fd for us.
+        // <https://registry.khronos.org/vulkan/specs/latest/man/html/vkGetMemoryFdKHR.html>
+        //
+        //     Each call to vkGetMemoryFdKHR must create a new file descriptor...
+        //
+        Ok(unsafe { OwnedFd::from_raw_fd(raw_fd) })
+    }
+
+    pub fn build_gdk_texture(&self) -> Result<gdk::Texture, BevyError> {
+        let fd = self.open_fd()?;
+        let (width, height) = (self.width(), self.height());
+        let builder = gdk::DmabufTextureBuilder::new()
+            .set_width(width)
+            .set_height(height)
+            .set_fourcc(self.drm_format.code as u32)
+            .set_modifier(self.drm_format.modifier.into())
+            .set_n_planes(1);
+
+        // SAFETY: we use `build_with_release_func` to:
+        // - move `fd` under the ownership of `gdk_texture`
+        // - close `fd` when `gdk_texture` is destroyed
+        let builder = unsafe { builder.set_fd(0, fd.as_raw_fd()) }
+            .set_offset(0, 0)
+            .set_stride(0, self.stride);
+
+        // SAFETY: I have no clue what the invariants are.
+        let gdk_texture = unsafe { builder.build_with_release_func(move || drop(fd))? };
+        Ok(gdk_texture)
     }
 }
 
@@ -45,11 +110,14 @@ const MEMORY_HANDLE_TYPE: vk::ExternalMemoryHandleTypeFlags =
     vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT;
 
 fn create_dmabuf_texture(
+    wgpu_adapter: &wgpu::Adapter,
+    hal_adapter: &wgpu_hal::vulkan::Adapter,
     wgpu_device: &wgpu::Device,
     hal_device: &wgpu_hal::vulkan::Device,
-    label: Option<&'static str>,
     width: u32,
     height: u32,
+    wgpu_format: wgpu::TextureFormat,
+    label: Option<&'static str>,
 ) -> Result<DmabufTexture, BevyError> {
     // Renderdoc doesn't support capturing processes which export memory.
     // As of renderdoc v1.39, [`ash::ext::image_drm_format_modifier::NAME`] is
@@ -76,10 +144,15 @@ fn create_dmabuf_texture(
     let vk_physical_device = hal_device.raw_physical_device();
     let vk_device = hal_device.raw_device();
 
-    let wgpu_format = wgpu::TextureFormat::Rgba8UnormSrgb;
-    let vk_format = vk::Format::R8G8B8A8_SRGB;
-    let drm_format = DrmFourcc::Abgr8888;
+    let vk_format = hal_adapter.texture_format_as_raw(wgpu_format);
+    let drm_format = format_to_fourcc(wgpu_format).ok_or_else(|| {
+        format!(
+            "texture format {wgpu_format:?} does not have a drm fourcc code and cannnot be used \
+             for a `DmabufTexture`"
+        )
+    })?;
     let drm_modifier = DrmModifier::Linear;
+    let stride = width * u32::BITS / 8;
 
     // check if we can use this modifier with this format
     let Some(drm_modifier_info) =
@@ -144,7 +217,7 @@ fn create_dmabuf_texture(
         let plane_layouts = [vk::SubresourceLayout {
             offset: 0,
             size: 0,
-            row_pitch: u64::from(width) * u64::from(u32::BITS / 8),
+            row_pitch: u64::from(stride),
             array_pitch: 0,
             depth_pitch: 0,
         }];
@@ -173,6 +246,8 @@ fn create_dmabuf_texture(
         }
         .push_next(&mut with_drm_format_modifier)
         .push_next(&mut with_external_memory);
+
+        println!("w/h = {width}/{height}");
         unsafe { vk_device.create_image(&params, None) }?
     };
 
@@ -282,6 +357,7 @@ fn create_dmabuf_texture(
             code: drm_format,
             modifier: drm_modifier,
         },
+        stride,
     })
 }
 
@@ -356,54 +432,10 @@ fn find_memory_type(type_bits: u32) -> u32 {
     panic!("uh oh");
 }
 
-impl DmabufTexture {
-    /// Opens a new file descriptor to the underlying dmabuf memory.
-    ///
-    /// The file descriptor (and therefore reference to the underlying dmabuf/
-    /// device memory) is owned by the caller. If the texture is dropped before
-    /// the file descriptor, the memory will stay allocated.
-    ///
-    /// # Errors
-    ///
-    /// See <https://registry.khronos.org/vulkan/specs/latest/man/html/vkGetMemoryFdKHR.html>.
-    pub fn open_fd(&self) -> Result<OwnedFd, BevyError> {
-        let get_fd_info = vk::MemoryGetFdInfoKHR {
-            memory: self.vk_memory,
-            handle_type: MEMORY_HANDLE_TYPE,
-            ..default()
-        };
-        let raw_fd = unsafe {
-            ash::khr::external_memory_fd::Device::new(&self.vk_instance, &self.vk_device)
-                .get_memory_fd(&get_fd_info)
-        }?;
-        // SAFETY: Vulkan just created a new open fd for us.
-        // <https://registry.khronos.org/vulkan/specs/latest/man/html/vkGetMemoryFdKHR.html>
-        //
-        //     Each call to vkGetMemoryFdKHR must create a new file descriptor...
-        //
-        Ok(unsafe { OwnedFd::from_raw_fd(raw_fd) })
-    }
-
-    pub fn build_gdk_texture(&self) -> Result<gdk::Texture, BevyError> {
-        let fd = self.open_fd()?;
-        let (width, height) = (self.width(), self.height());
-        let builder = gdk::DmabufTextureBuilder::new()
-            .set_width(width)
-            .set_height(height)
-            .set_fourcc(self.drm_format.code as u32)
-            .set_modifier(self.drm_format.modifier.into())
-            .set_n_planes(1);
-
-        // SAFETY: we use `build_with_release_func` to:
-        // - move `fd` under the ownership of `gdk_texture`
-        // - close `fd` when `gdk_texture` is destroyed
-        let builder = unsafe { builder.set_fd(0, fd.as_raw_fd()) }
-            .set_offset(0, 0)
-            // <https://docs.kernel.org/userspace-api/dma-buf-alloc-exchange.html#term-stride>
-            .set_stride(0, width * u32::BITS / 8);
-
-        // SAFETY: I have no clue what the invariants are.
-        let gdk_texture = unsafe { builder.build_with_release_func(move || drop(fd))? };
-        Ok(gdk_texture)
+fn format_to_fourcc(format: wgpu::TextureFormat) -> Option<DrmFourcc> {
+    use {DrmFourcc as Cc, wgpu::TextureFormat as Tf};
+    match format {
+        Tf::Rgba8Unorm | Tf::Rgba8UnormSrgb => Some(Cc::Abgr8888),
+        _ => None, // TODO
     }
 }
