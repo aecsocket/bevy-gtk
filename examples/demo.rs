@@ -1,10 +1,5 @@
 use {
-    bevy::{
-        camera::RenderTarget,
-        prelude::*,
-        window::{PrimaryWindow, WindowResolution},
-        winit::WinitPlugin,
-    },
+    bevy::{camera::RenderTarget, prelude::*, window::PrimaryWindow, winit::WinitPlugin},
     bevy_gtk::{GtkInitPlugin, GtkPlugin, NewWindowContent, render::GtkViewports},
 };
 
@@ -43,10 +38,9 @@ fn main() -> AppExit {
             titlebar_transparent: args.titlebar_transparent,
             titlebar_show_title: !args.no_title,
             titlebar_show_buttons: !args.no_buttons,
-            resolution: WindowResolution::new(50, 50),
             resize_constraints: WindowResizeConstraints {
-                min_width: 1.0,
-                min_height: 1.0,
+                min_width: 360.0,
+                min_height: 200.0,
                 max_width: f32::INFINITY,
                 max_height: f32::INFINITY,
             },

@@ -89,7 +89,7 @@ pub(super) fn plugin(app: &mut App) {
     render_app.add_systems(
         Render,
         (
-            // TODO: change scheduling?
+            // I tested; this exact scheduling is correct.
             set_target_images.after(RenderSystems::ExtractCommands),
             present_frames.after(RenderSystems::Render),
         ),
@@ -195,15 +195,23 @@ impl ExtractComponent for RenderViewport {
 
 fn update_images(mut viewports: Query<&mut Viewport>, mut images: ResMut<Assets<Image>>) {
     for mut viewport in &mut viewports {
-        let (new_width, new_height) = read_size(&viewport.widget_size);
+        let (new_width, new_height) = (
+            viewport.widget_size.0.load(atomic::Ordering::SeqCst),
+            viewport.widget_size.1.load(atomic::Ordering::SeqCst),
+        );
         let (old_width, old_height) = viewport.old_widget_size;
         if new_width != old_width || new_height != old_height {
+            trace!(
+                "Old/new widget size: {old_width}x{old_height} / {new_width}x{new_height}, \
+                 creating new main world image"
+            );
             viewport.old_widget_size = (new_width, new_height);
 
+            let (tex_width, tex_height) = texture_size(new_width, new_height);
             let mut image = Image::new_uninit(
                 Extent3d {
-                    width: new_width,
-                    height: new_height,
+                    width: tex_width,
+                    height: tex_height,
                     depth_or_array_layers: 1,
                 },
                 TextureDimension::D2,
@@ -220,14 +228,11 @@ fn update_images(mut viewports: Query<&mut Viewport>, mut images: ResMut<Assets<
     }
 }
 
-fn read_size(widget_size: &Arc<(AtomicU32, AtomicU32)>) -> (u32, u32) {
-    let (width, height) = (
-        widget_size.0.load(atomic::Ordering::SeqCst),
-        widget_size.1.load(atomic::Ordering::SeqCst),
-    );
-    // (width.max(1), height.max(1))
-    let (width, height) = (width.max(1), height.max(1));
-    (width.div_ceil(64) * 64, height.div_ceil(64) * 64)
+fn texture_size(width: u32, height: u32) -> (u32, u32) {
+    (
+        width.max(1).div_ceil(64) * 64,
+        height.max(1).div_ceil(64) * 64,
+    )
 }
 
 // frame-to-frame rendering logic, in the render world
@@ -247,16 +252,13 @@ fn set_target_images(
 
         let (old_width, old_height) = viewport.old_widget_size;
         if new_width != old_width || new_height != old_height {
-            viewport.old_widget_size = (new_width, new_height);
             trace!(
-                "Old/new window size: {old_width}x{old_height} / {new_width}x{new_height}, \
+                "Old/new widget size: {old_width}x{old_height} / {new_width}x{new_height}, \
                  creating new dmabuf"
             );
+            viewport.old_widget_size = (new_width, new_height);
 
-            let (tex_width, tex_height) = (
-                new_width.max(1).div_ceil(64) * 64,
-                new_height.max(1).div_ceil(64) * 64,
-            );
+            let (tex_width, tex_height) = texture_size(new_width, new_height);
 
             let dmabuf = DmabufTexture::new(
                 &render_adapter,
@@ -290,8 +292,6 @@ fn set_target_images(
 
 fn present_frames(mut viewports: Query<&mut RenderViewport>) {
     for mut viewport in &mut viewports {
-        let viewport = &mut *viewport;
-
         if let Some(dmabuf) = viewport.queued_dmabuf.take() {
             viewport
                 .next_dmabuf
@@ -400,6 +400,12 @@ impl WidgetFactory {
         offload.add_tick_callback(move |_, _| {
             if let Some(dmabuf) = next_dmabuf.take(atomic::Ordering::SeqCst) {
                 trace!("Downloading new dmabufs from GTK");
+                // "wait.. why do we build 2 gdk textures for the same dmabuf?"
+                //
+                // GTK doesn't redraw the picture unless you manually change the
+                // paintable inside it. I couldn't find a way to force it to redraw.
+                // So instead, we have 2 paintables with the same underlying content
+                // (same dmabuf), and switch between them.
                 let (texture_a, texture_b) = (
                     dmabuf
                         .build_gdk_texture()
