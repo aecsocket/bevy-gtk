@@ -1,21 +1,15 @@
 use {
     bevy::{
-        camera::{ManualTextureViewHandle, RenderTarget},
+        camera::RenderTarget,
         prelude::*,
-        render::renderer::RenderDevice,
-        window::{WindowRef, WindowResolution},
+        window::{PrimaryWindow, WindowResolution},
         winit::WinitPlugin,
     },
-    bevy_gtk::{
-        GtkPlugin, NewWindowContent,
-        render::{DmabufTexture, GtkRenderData},
-    },
-    bevy_render::renderer::RenderAdapter,
-    std::sync::Mutex,
-    wgpu::TextureViewDescriptor,
+    bevy_gtk::{GtkInitPlugin, GtkPlugin, NewWindowContent, render::GtkViewports},
 };
 
 #[derive(Debug, clap::Parser)]
+#[allow(clippy::struct_excessive_bools, reason = "`clap` args")]
 struct Args {
     #[arg(long, value_enum, default_value_t = DemoMode::Adw)]
     mode: DemoMode,
@@ -63,54 +57,36 @@ fn main() -> AppExit {
     match args.mode {
         DemoMode::Winit => app.add_plugins(default_plugins),
         DemoMode::Gtk => app.add_plugins((
-            GtkRenderPlugin,
+            GtkInitPlugin,
             default_plugins.build().disable::<WinitPlugin>(),
             GtkPlugin::new(APP_ID).without_adw(),
         )),
         DemoMode::Adw => app.add_plugins((
-            GtkRenderPlugin,
+            GtkInitPlugin,
             default_plugins.build().disable::<WinitPlugin>(),
             GtkPlugin::new(APP_ID).with_adw(),
         )),
     };
     app.add_systems(Startup, setup)
-        .add_systems(
-            Update,
-            (
-                rotate_cube,
-                |mut mt: ResMut<ManualTextureViews>, mut c: Query<&mut Camera>| {
-                    if *DROPPED.lock().unwrap() {
-                        mt.remove(&ManualTextureViewHandle(0));
-                        for mut c in &mut c {
-                            c.target = RenderTarget::Window(WindowRef::Primary);
-                        }
-                    }
-                },
-            ),
-        )
+        .add_systems(Update, rotate_cube)
         .run()
 }
 
 #[derive(Debug, Component)]
 struct Rotating;
 
-static DROPPED: Mutex<bool> = Mutex::new(false);
-
 fn setup(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    mut manual_texture_views: ResMut<ManualTextureViews>,
-    render_adapter: Res<RenderAdapter>,
-    render_device: Res<RenderDevice>,
-    gtk_render_data: Res<GtkRenderData>,
+    mut viewports: GtkViewports,
     window: Single<Entity, With<PrimaryWindow>>,
 ) {
     // circular base
     commands.spawn((
         Mesh3d(meshes.add(Circle::new(4.0))),
         MeshMaterial3d(materials.add(Color::WHITE)),
-        Transform::from_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2)),
+        Transform::from_rotation(Quat::from_rotation_x(-core::f32::consts::FRAC_PI_2)),
     ));
     // cube
     commands.spawn((
@@ -129,31 +105,11 @@ fn setup(
     ));
 
     // camera
-    let (width, height) = (512, 512);
-    let fb = DmabufTexture::new(
-        &render_adapter.0,
-        render_device.wgpu_device(),
-        width,
-        height,
-        None,
-    )
-    .unwrap();
-    let fb_view = fb.create_view(&TextureViewDescriptor::default());
-    let manual_texture_view = ManualTextureViewHandle(0);
-    manual_texture_views.insert(
-        manual_texture_view,
-        ManualTextureView {
-            texture_view: fb_view.into(),
-            size: (width, height).into(),
-            format: fb.format(),
-        },
-    );
-
-    let (viewport, viewport_widget) = GtkViewport::new();
+    let (image, widget_factory) = viewports.create();
 
     commands.spawn((
         Camera {
-            target: RenderTarget::TextureView(manual_texture_view),
+            target: RenderTarget::Image(image.into()),
             ..default()
         },
         Camera3d::default(),
@@ -162,7 +118,7 @@ fn setup(
 
     commands
         .entity(*window)
-        .insert(NewWindowContent::from(move || viewport_widget.make()));
+        .insert(NewWindowContent::from(move || widget_factory.make()));
 }
 
 fn rotate_cube(time: Res<Time>, mut query: Query<&mut Transform, With<Rotating>>) {

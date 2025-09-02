@@ -56,14 +56,13 @@ use {
         texture::{DefaultImageSampler, GpuImage},
     },
     core::{
-        cell::Cell,
+        cell::{Cell, RefCell},
         mem,
         sync::atomic::{self, AtomicU32},
     },
     glib::clone,
     gtk::prelude::*,
     log::{debug, trace},
-    std::cell::RefCell,
     wgpu::{Extent3d, TextureDimension, TextureFormat, TextureUsages, TextureViewDescriptor},
 };
 
@@ -115,19 +114,27 @@ struct RenderViewport {
     image_handle: Handle<Image>,
     next_dmabuf: Arc<AtomicOptionBox<DmabufTexture>>,
     widget_size: Arc<(AtomicU32, AtomicU32)>,
-    front_buffer: Option<Framebuffer>,
-    back_buffer: Option<Framebuffer>,
+    /// Texture and view that this viewport will render into.
+    back_buffer: Option<(Texture, TextureView)>,
+    /// Value of [`RenderViewport::widget_size`] from the previous frame.
+    ///
+    /// If this is different to the current size, we will create a new texture
+    /// with the new size and render into that.
     old_widget_size: (u32, u32),
+    /// Texture which will next be stored in [`RenderViewport::next_dmabuf`].
+    ///
+    /// When we need to create a new texture because the size has changed, we
+    /// do the following:
+    /// - before rendering
+    ///   - create a new [`DmabufTexture`]
+    ///   - set that texture as the [`RenderViewport::back_buffer`]
+    ///   - set that texture as the queued dmabuf
+    ///   - do *not* put it in `next_dmabuf` yet, since we've just made it and
+    ///     it has no rendered content
+    /// - after rendering
+    ///   - the dmabuf now has drawn content, so take the dmabuf and put it into
+    ///     `next_dmabuf`
     queued_dmabuf: Option<DmabufTexture>,
-}
-
-#[derive(Debug)]
-struct Framebuffer {
-    // even though we can make a Bevy `Texture` from the `dmabuf`'s `wgpu::Texture`,
-    // we should cache it here, because each new `Texture` increments an ID counter.
-    // see `TextureId`
-    texture: Texture,
-    texture_view: TextureView,
 }
 
 // creation logic
@@ -177,7 +184,6 @@ impl ExtractComponent for RenderViewport {
             image_handle: viewport.image_handle.clone(),
             widget_size: viewport.widget_size.clone(),
             next_dmabuf: viewport.next_dmabuf.clone(),
-            front_buffer: None,
             back_buffer: None,
             old_widget_size: (u32::MAX, u32::MAX),
             queued_dmabuf: None,
@@ -209,7 +215,7 @@ fn update_images(mut viewports: Query<&mut Viewport>, mut images: ResMut<Assets<
                 | TextureUsages::RENDER_ATTACHMENT;
             images
                 .insert(&viewport.image_handle, image)
-                .expect("image generation should be valid");
+                .expect("should be able to insert image asset");
         }
     }
 }
@@ -264,23 +270,17 @@ fn set_target_images(
 
             let texture = Texture::from(dmabuf.wgpu_texture().clone());
             let texture_view = texture.create_view(&TextureViewDescriptor::default());
-            viewport.back_buffer = Some(Framebuffer {
-                texture,
-                texture_view,
-            });
+            viewport.back_buffer = Some((texture, texture_view));
             viewport.queued_dmabuf = Some(dmabuf);
         }
 
-        if let Some(back_buffer) = &viewport.back_buffer {
-            // make our image handle point into this back buffer
-            // remember: we constantly swap between front and back buffers,
-            // so we need to update this on every frame
+        if let Some((texture, texture_view)) = &viewport.back_buffer {
             let gpu_image = GpuImage {
-                texture: back_buffer.texture.clone(),
-                texture_view: back_buffer.texture_view.clone(),
-                texture_format: back_buffer.texture.format(),
+                texture: texture.clone(),
+                texture_view: texture_view.clone(),
+                texture_format: texture.format(),
                 sampler: (**default_image_sampler).clone(),
-                size: back_buffer.texture.size(),
+                size: texture.size(),
                 mip_level_count: 1,
             };
             gpu_images.insert(&viewport.image_handle, gpu_image);
@@ -291,9 +291,6 @@ fn set_target_images(
 fn present_frames(mut viewports: Query<&mut RenderViewport>) {
     for mut viewport in &mut viewports {
         let viewport = &mut *viewport;
-
-        // we've just rendered into the back buffer, now we flip buffers
-        mem::swap(&mut viewport.back_buffer, &mut viewport.front_buffer);
 
         if let Some(dmabuf) = viewport.queued_dmabuf.take() {
             viewport

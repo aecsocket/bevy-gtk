@@ -77,8 +77,8 @@ fn setup_cameras(
     window: Single<Entity, With<PrimaryWindow>>,
     mut viewports: GtkViewports,
 ) {
-    let (left_image, left_viewport_factory) = viewports.create();
-    let (right_image, right_viewport_factory) = viewports.create();
+    let (left_image, left_widget_factory) = viewports.create();
+    let (right_image, right_widget_factory) = viewports.create();
 
     commands.spawn((
         Camera {
@@ -103,10 +103,10 @@ fn setup_cameras(
             let editor = editor::EditorDemo::new();
             editor
                 .bevy_content_left()
-                .set_child(Some(&left_viewport_factory.make()));
+                .set_child(Some(&left_widget_factory.make()));
             editor
                 .bevy_content_right()
-                .set_child(Some(&right_viewport_factory.make()));
+                .set_child(Some(&right_widget_factory.make()));
             editor
         }));
 }
