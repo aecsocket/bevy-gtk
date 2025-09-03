@@ -12,11 +12,13 @@ use {
     log::info,
 };
 
+mod event;
+
 pub(super) fn plugin(app: &mut App) {
-    app.add_systems(
+    app.add_plugins(event::plugin).add_systems(
         Last,
         (
-            create_bevy_to_gtk,
+            create_gtk_windows,
             despawn,
             sync_new_content,
             sync_window_config,
@@ -50,11 +52,21 @@ impl GtkWindows {
     pub fn entity_to_proxy(&self) -> &HashMap<Entity, WindowProxy> {
         &self.entity_to_proxy
     }
+
+    #[must_use]
+    pub fn get(&self, entity: Entity) -> Option<&WindowProxy> {
+        self.entity_to_proxy.get(&entity)
+    }
+
+    #[must_use]
+    pub fn get_mut(&mut self, entity: Entity) -> Option<&mut WindowProxy> {
+        self.entity_to_proxy.get_mut(&entity)
+    }
 }
 
 #[derive(Debug)]
 pub struct WindowProxy {
-    pub gtk: gtk::ApplicationWindow,
+    pub gtk_window: gtk::ApplicationWindow,
     content: gtk::Widget,
     cache: Option<Window>,
     rx_close_request: async_channel::Receiver<()>,
@@ -91,7 +103,7 @@ where
     }
 }
 
-pub(super) fn create_bevy_to_gtk(
+pub fn create_gtk_windows(
     new_windows: Query<(Entity, &mut Window), Added<Window>>,
     mut gtk_windows: NonSendMut<GtkWindows>,
     gtk_app: NonSend<GtkApplication>,
@@ -123,13 +135,13 @@ pub(super) fn create_bevy_to_gtk(
         });
 
         let mut proxy = WindowProxy {
-            gtk: gtk_window,
+            gtk_window,
             content: gtk::Label::new(None).upcast(),
             cache: None,
             rx_close_request,
         };
         sync_one(gtk_windows.use_adw, bevy_window, &mut proxy);
-        proxy.gtk.present();
+        proxy.gtk_window.present();
 
         entry.insert(proxy);
         window_created_events.write(WindowCreated { window: entity });
@@ -176,7 +188,7 @@ pub fn sync_window_config(
 )]
 fn sync_one(use_adw: bool, new: &Window, proxy: &mut WindowProxy) {
     let cache = proxy.cache.as_ref();
-    let gtk_window = &proxy.gtk;
+    let gtk_window = &proxy.gtk_window;
 
     if cache.is_none_or(|c| c.mode != new.mode) {
         match new.mode {
@@ -228,13 +240,13 @@ fn sync_one(use_adw: bool, new: &Window, proxy: &mut WindowProxy) {
     if rebuild_widgets {
         if_adw!(
             use_adw,
-            if let Some(adw_window) = proxy.gtk.downcast_ref::<adw::ApplicationWindow>() {
+            if let Some(adw_window) = proxy.gtk_window.downcast_ref::<adw::ApplicationWindow>() {
                 use adw::prelude::*;
 
                 let content_root = adw_content_root(new, &proxy.content);
                 adw_window.set_content(Some(&content_root));
             },
-            proxy.gtk.set_child(Some(&proxy.content)),
+            proxy.gtk_window.set_child(Some(&proxy.content)),
         );
     }
 
@@ -347,7 +359,7 @@ pub fn despawn(
     for window in closed.read() {
         info!("Closing window {window}");
         if let Some(proxy) = gtk_windows.entity_to_proxy.remove(&window) {
-            proxy.gtk.destroy();
+            proxy.gtk_window.destroy();
         }
         closed_events.write(WindowClosed { window });
     }

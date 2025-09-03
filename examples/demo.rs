@@ -1,13 +1,14 @@
 use {
     bevy::{prelude::*, window::PrimaryWindow, winit::WinitPlugin},
     bevy_gtk::{GtkInitPlugin, GtkPlugin, GtkViewports, GtkWindowContent},
+    bevy_window::WindowEvent,
 };
 
 #[derive(Debug, Resource, clap::Parser)]
 #[allow(clippy::struct_excessive_bools, reason = "`clap` args")]
 struct Args {
-    #[arg(long, value_enum, default_value_t = DemoMode::Adw)]
-    mode: DemoMode,
+    #[arg(long, value_enum, default_value_t = Backend::Adw)]
+    backend: Backend,
     #[arg(long)]
     no_titlebar: bool,
     #[arg(long)]
@@ -19,7 +20,7 @@ struct Args {
 }
 
 #[derive(Debug, Clone, Copy, Default, clap::ValueEnum)]
-enum DemoMode {
+enum Backend {
     Winit,
     Gtk,
     #[default]
@@ -48,16 +49,16 @@ fn main() -> AppExit {
         }),
         ..default()
     });
-    match args.mode {
-        DemoMode::Winit => app.add_plugins(default_plugins),
-        DemoMode::Gtk => app
+    match args.backend {
+        Backend::Winit => app.add_plugins(default_plugins),
+        Backend::Gtk => app
             .add_plugins((
                 GtkInitPlugin,
                 default_plugins.build().disable::<WinitPlugin>(),
                 GtkPlugin::new(APP_ID).without_adw(),
             ))
             .add_systems(Startup, setup_gtk.after(setup)),
-        DemoMode::Adw => app
+        Backend::Adw => app
             .add_plugins((
                 GtkInitPlugin,
                 default_plugins.build().disable::<WinitPlugin>(),
@@ -67,7 +68,7 @@ fn main() -> AppExit {
     };
 
     app.add_systems(Startup, setup)
-        .add_systems(Update, rotate_cube)
+        .add_systems(Update, (rotate_cube, log_window_events))
         .run()
 }
 
@@ -124,5 +125,11 @@ fn rotate_cube(time: Res<Time>, mut query: Query<&mut Transform, With<Rotating>>
     for mut transform in &mut query {
         transform.rotate_x(0.9 * time.delta_secs());
         transform.rotate_y(0.7 * time.delta_secs());
+    }
+}
+
+fn log_window_events(mut events: EventReader<WindowEvent>) {
+    for event in events.read() {
+        info!("{event:?}");
     }
 }
