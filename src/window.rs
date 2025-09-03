@@ -67,9 +67,9 @@ impl WindowProxy {
 }
 
 #[derive(Component)]
-pub struct NewWindowContent(pub Option<Box<dyn MakeWidget>>);
+pub struct GtkWindowContent(pub Option<Box<dyn MakeWidget>>);
 
-impl<T: MakeWidget> From<T> for NewWindowContent {
+impl<T: MakeWidget> From<T> for GtkWindowContent {
     fn from(value: T) -> Self {
         Self(Some(Box::new(value)))
     }
@@ -143,7 +143,7 @@ pub(super) fn create_bevy_to_gtk(
 
 pub fn sync_bevy_to_gtk(
     mut commands: Commands,
-    mut changed_windows: Query<(Entity, &Window, Option<&mut NewWindowContent>), Changed<Window>>,
+    mut changed_windows: Query<(Entity, &Window, Option<&mut GtkWindowContent>), Changed<Window>>,
     mut gtk_windows: NonSendMut<GtkWindows>,
 ) {
     for (entity, bevy_window, mut new_window_content) in &mut changed_windows {
@@ -156,7 +156,7 @@ pub fn sync_bevy_to_gtk(
             if let Some(make_content) = new_window_content.0.take() {
                 proxy.set_content(make_content.make());
             }
-            commands.entity(entity).remove::<NewWindowContent>();
+            commands.entity(entity).remove::<GtkWindowContent>();
         }
 
         sync_one(gtk_windows.use_adw, bevy_window, proxy);

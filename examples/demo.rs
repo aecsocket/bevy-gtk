@@ -1,6 +1,6 @@
 use {
     bevy::{prelude::*, window::PrimaryWindow, winit::WinitPlugin},
-    bevy_gtk::{GtkInitPlugin, GtkPlugin, NewWindowContent, render::GtkViewports},
+    bevy_gtk::{GtkInitPlugin, GtkPlugin, GtkWindowContent, render::GtkViewports},
 };
 
 #[derive(Debug, Resource, clap::Parser)]
@@ -117,7 +117,7 @@ fn setup_gtk(
     commands.entity(*camera).insert(viewport);
     commands
         .entity(*window)
-        .insert(NewWindowContent::from(move || widget_factory.make()));
+        .insert(GtkWindowContent::from(move || widget_factory.make()));
 }
 
 fn rotate_cube(time: Res<Time>, mut query: Query<&mut Transform, With<Rotating>>) {

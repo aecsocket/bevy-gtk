@@ -1,7 +1,7 @@
 use {
     adw::prelude::*,
     bevy::{prelude::*, window::PrimaryWindow, winit::WinitPlugin},
-    bevy_gtk::{GtkInitPlugin, GtkPlugin, NewWindowContent, render::GtkViewports},
+    bevy_gtk::{GtkInitPlugin, GtkPlugin, GtkWindowContent, render::GtkViewports},
 };
 
 const APP_ID: &str = "io.github.aecsocket.BevyGtk";
@@ -93,7 +93,7 @@ fn setup_cameras(
 
     commands
         .entity(*window)
-        .insert(NewWindowContent::from(move || {
+        .insert(GtkWindowContent::from(move || {
             let editor = editor::EditorDemo::new();
             editor
                 .bevy_content_left()

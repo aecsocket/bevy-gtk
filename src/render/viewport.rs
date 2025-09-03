@@ -5,10 +5,10 @@
 //!   camera render into that viewport
 //!   - you can also get a [`Handle<Image>`] to its image directly, if you need
 //!     that
-//!   - the existence of this [`GtkViewport`] on an entity also drives rendering
-//!     logic
 //! - you get a [`ViewportWidgetFactory`] which you can use to make a
 //!   [`gtk::GraphicsOffload`] widget for your app
+//! - a private [`ViewportPrivate`] entity is spawned which is copied into the
+//!   render world, and drives rendering logic
 //!
 //! There is a real Bevy image that backs the handle, but we don't actually use
 //! that image for rendering into. We only need it for some compatibility stuff
@@ -105,31 +105,52 @@ pub(super) fn plugin(app: &mut App) {
     );
 }
 
+/// Represents a [`gtk::Widget`] which renders Bevy content.
+///
+/// Use [`GtkViewports::create`] to create one, and insert this into a
+/// [`Camera`] entity to force the camera to render into the GTK viewport. This
+/// component will automatically handle details like scale factor.
+///
+/// Note that this component does not keep the viewport alive and does not drive
+/// rendering logic; only camera logic. The actual GTK viewport and underlying
+/// rendering logic lives for as long as the GTK widget lives.
 #[derive(Debug, Component)]
-#[require(SyncToRenderWorld)]
 pub struct GtkViewport {
-    /// [`Handle`] to the [`Image`] used as a [`Camera::target`] for rendering.
-    ///
-    /// [`Camera::target`]: bevy_camera::Camera::target
     image_handle: Handle<Image>,
-    next_dmabuf: Arc<AtomicOptionBox<DmabufTexture>>,
-    widget_size: Arc<(AtomicU32, AtomicU32)>,
     widget_scale_factor: Arc<AtomicF64>,
-    /// Marks if the GTK-side widget is still alive.
-    widget_alive: Arc<()>,
-    old_widget_size: (u32, u32),
 }
 
 impl GtkViewport {
+    /// [`Handle`] to the [`Image`] used as a [`Camera::target`] for rendering.
+    ///
+    /// If you have more advanced needs you can use the image handle directly,
+    /// but this will not account for window scale factor.
+    ///
+    /// [`Camera::target`]: bevy_camera::Camera::target
     #[must_use]
     pub fn image_handle(&self) -> &Handle<Image> {
         &self.image_handle
     }
 
+    /// Current scale factor of the GTK widget.
+    ///
+    /// This takes fractional scaling into account, and the resulting render
+    /// target output is already properly scaled by this factor.
     #[must_use]
     pub fn widget_scale_factor(&self) -> f64 {
         self.widget_scale_factor.load(atomic::Ordering::SeqCst)
     }
+}
+
+#[derive(Debug, Component)]
+#[require(SyncToRenderWorld)]
+struct ViewportPrivate {
+    image_handle: Handle<Image>,
+    next_dmabuf: Arc<AtomicOptionBox<DmabufTexture>>,
+    widget_size: Arc<(AtomicU32, AtomicU32)>,
+    /// Marks if the GTK-side widget is still alive.
+    widget_alive: Arc<()>,
+    old_widget_size: (u32, u32),
 }
 
 #[derive(Debug, Component)]
@@ -162,12 +183,23 @@ struct RenderViewport {
 
 // creation logic
 
+/// Allows creating a [`GtkViewport`].
 #[derive(SystemParam)]
-pub struct GtkViewports<'w> {
+pub struct GtkViewports<'w, 's> {
     images: ResMut<'w, Assets<Image>>,
+    commands: Commands<'w, 's>,
 }
 
-impl GtkViewports<'_> {
+impl GtkViewports<'_, '_> {
+    /// Creates a viewport, exposing the Bevy [`GtkViewport`] and GTK
+    /// [`WidgetFactory`] for this viewport.
+    ///
+    /// This does not directly create the [`gtk::Widget`] as GTK types are
+    /// `!Send`, so it would be useless to create one off of the GTK thread.
+    /// Instead, call [`WidgetFactory::make`] inside [`GtkWindowContent`] to
+    /// set the content on the GTK thread.
+    ///
+    /// [`GtkWindowContent`]: crate::GtkWindowContent
     pub fn create(&mut self) -> (GtkViewport, WidgetFactory) {
         let image_handle = self.images.reserve_handle();
         let next_dmabuf = Arc::new(AtomicOptionBox::none());
@@ -175,14 +207,18 @@ impl GtkViewports<'_> {
         let widget_scale_factor = Arc::new(AtomicF64::new(1.0));
         let widget_alive = Arc::new(());
 
+        self.commands.spawn(ViewportPrivate {
+            image_handle: image_handle.clone(),
+            next_dmabuf: next_dmabuf.clone(),
+            widget_size: widget_size.clone(),
+            widget_alive: widget_alive.clone(),
+            old_widget_size: (u32::MAX, u32::MAX),
+        });
+
         (
             GtkViewport {
                 image_handle,
-                next_dmabuf: next_dmabuf.clone(),
-                widget_size: widget_size.clone(),
                 widget_scale_factor: widget_scale_factor.clone(),
-                widget_alive: widget_alive.clone(),
-                old_widget_size: (u32::MAX, u32::MAX),
             },
             WidgetFactory {
                 next_dmabuf,
@@ -195,8 +231,8 @@ impl GtkViewports<'_> {
 }
 
 impl ExtractComponent for RenderViewport {
-    type QueryData = &'static GtkViewport;
-    type QueryFilter = Added<GtkViewport>;
+    type QueryData = &'static ViewportPrivate;
+    type QueryFilter = Added<ViewportPrivate>;
     type Out = Self;
 
     fn extract_component(viewport: QueryItem<Self::QueryData>) -> Option<Self::Out> {
@@ -225,7 +261,7 @@ fn sync_viewport_and_camera(mut viewports: Query<(&GtkViewport, &mut Camera)>) {
     }
 }
 
-fn update_images(mut viewports: Query<&mut GtkViewport>, mut images: ResMut<Assets<Image>>) {
+fn update_images(mut viewports: Query<&mut ViewportPrivate>, mut images: ResMut<Assets<Image>>) {
     for mut viewport in &mut viewports {
         let (new_width, new_height) = (
             viewport.widget_size.0.load(atomic::Ordering::SeqCst),
@@ -261,6 +297,7 @@ fn update_images(mut viewports: Query<&mut GtkViewport>, mut images: ResMut<Asse
 }
 
 fn texture_size(width: u32, height: u32) -> (u32, u32) {
+    // TODO no rounding pls
     (
         width.max(1).div_ceil(64) * 64,
         height.max(1).div_ceil(64) * 64,
@@ -333,7 +370,10 @@ fn present_frames(mut viewports: Query<&mut RenderViewport>) {
 
 // destroy logic
 
-fn despawn_destroyed_viewports(viewports: Query<(Entity, &GtkViewport)>, mut commands: Commands) {
+fn despawn_destroyed_viewports(
+    viewports: Query<(Entity, &ViewportPrivate)>,
+    mut commands: Commands,
+) {
     for (entity, viewport) in &viewports {
         if Arc::strong_count(&viewport.widget_alive) == 1 {
             debug!("Despawned viewport {entity} because its GTK widget was dropped");
@@ -389,17 +429,17 @@ impl WidgetFactory {
         let get_scale = |widget: &gtk::Widget| {
             widget
                 .native()
-                .expect("widget should have a native")
-                .surface()
-                .expect("native should have a surface")
-                .scale()
+                .and_then(|native| native.surface())
+                .map(|surface| surface.scale())
         };
 
         offload.connect_scale_factor_notify(clone!(
             #[strong]
             widget_size,
             move |widget| {
-                let scale = get_scale(widget.upcast_ref());
+                let Some(scale) = get_scale(widget.upcast_ref()) else {
+                    return;
+                };
                 widget_scale_factor.store(scale, atomic::Ordering::SeqCst);
 
                 #[expect(
@@ -434,7 +474,10 @@ impl WidgetFactory {
                 #[strong]
                 widget_size,
                 move |widget, _, width, _| {
-                    let scale = get_scale(widget.upcast_ref());
+                    let Some(scale) = get_scale(widget.upcast_ref()) else {
+                        return;
+                    };
+
                     let width = (f64::from(width) * scale) as u32;
                     widget_size.0.store(width, atomic::Ordering::SeqCst);
                 },
@@ -445,7 +488,10 @@ impl WidgetFactory {
                 #[strong]
                 widget_size,
                 move |widget, _, _, height| {
-                    let scale = get_scale(widget.upcast_ref());
+                    let Some(scale) = get_scale(widget.upcast_ref()) else {
+                        return;
+                    };
+
                     let height = (f64::from(height) * scale) as u32;
                     widget_size.1.store(height, atomic::Ordering::SeqCst);
                 },
@@ -494,7 +540,7 @@ impl WidgetFactory {
             glib::ControlFlow::Continue
         });
 
-        let widget_alive = Cell::new(Some(widget_alive));
+        let widget_alive = Cell::new(widget_alive);
         offload.connect_destroy(move |_| drop(widget_alive.take()));
 
         container.upcast()
