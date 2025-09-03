@@ -157,6 +157,13 @@ fn create_dmabuf_texture(
     // this extension if you use a `vk::ImageTiling::LINEAR` image instead of
     // `vk::ImageTiling::DRM_FORMAT_MODIFIER_EXT`, but I think this is less
     // correct.
+    //
+    // Advice to anyone looking at this code: READ THESE DOCS!!!
+    // - <https://docs.kernel.org/userspace-api/dma-buf-alloc-exchange.html>
+    // - <https://registry.khronos.org/vulkan/specs/latest/man/html/VK_EXT_image_drm_format_modifier.html>
+    // I wasted so much time because I didn't read them... so read them!
+    // And no, LLMs didn't help me here, I tried. You have to *understand* what
+    // you're writing.
 
     // SAFETY: `hal_adapter` is not manually destroyed by us
     let hal_adapter = unsafe { wgpu_adapter.as_hal::<wgpu_hal::vulkan::Api>() }
@@ -178,6 +185,10 @@ fn create_dmabuf_texture(
         .ok_or_else(|| format!("texture format {wgpu_format:?} cannot be mapped to a fourcc"))?;
 
     // create an image with a potentially multi-planar layout
+    // note: even though the `wgpu_format` may be single-planar (i.e. rgba8unorm),
+    // the DRM modifier may force the image to have multiple MEMORY planes
+    // (not COLOR planes).
+    // the `plane_count` here is the number of MEMORY planes.
     let (vk_image, drm_modifier, plane_count) =
         unsafe { create_image(&dev, width, height, wgpu_format) }?;
     trace!(
@@ -187,17 +198,7 @@ fn create_dmabuf_texture(
         drm_modifier.vendor(),
     );
 
-    // <https://www.reddit.com/r/vulkan/comments/11r29hb/what_are_the_different_memory_allocation/>
-
-    // get how much memory each plane uses, and make 1 big allocation for all of
-    // them
-    // - find offsets for each plane and store them for the DmabufTexture
-    // - find a common alignment and memory type for the big allocation
-    // - after we've done all planes, do the big allocation
-    let mut allocation_size = 0u64;
-    let mut memory_type_bits = u32::MAX;
     let mut planes = ArrayVec::new();
-    let mut bind_plane_image_memory_list = ArrayVec::<_, MAX_PLANES_U>::new();
     for plane_index in 0..plane_count {
         let plane_aspect = match plane_index {
             0 => vk::ImageAspectFlags::MEMORY_PLANE_0_EXT,
@@ -207,43 +208,28 @@ fn create_dmabuf_texture(
             _ => panic!("there should be no more than 4 memory planes"),
         };
 
-        let plane_memory_requirements =
-            unsafe { get_plane_memory_requirements(&dev, vk_image, plane_aspect) };
+        let subresource = vk::ImageSubresource {
+            aspect_mask: plane_aspect,
+            mip_level: 0,
+            array_layer: 0,
+        };
+        let subresource_layout = unsafe {
+            dev.vk_device
+                .get_image_subresource_layout(vk_image, subresource)
+        };
 
-        let size = plane_memory_requirements.size;
-        memory_type_bits &= plane_memory_requirements.memory_type_bits; // TODO: or `|=`?
-        trace!("Plane {plane_index} requires {size} bytes");
+        let offset = subresource_layout.offset;
+        let row_pitch = subresource_layout.row_pitch;
+        trace!("Plane {plane_index} has offset {offset} stride/row pitch {row_pitch}");
 
         planes.push(DmabufPlane {
-            offset: u32::try_from(allocation_size).expect("memory allocation too large"),
-            stride: width * 4, // TODO
+            offset: u32::try_from(offset).expect("offset too large"),
+            stride: u32::try_from(row_pitch).expect("stride too large"),
         });
-        bind_plane_image_memory_list.push(vk::BindImagePlaneMemoryInfo {
-            plane_aspect,
-            ..default()
-        });
-        allocation_size = allocation_size
-            .checked_add(size)
-            .expect("memory allocation too large");
     }
 
-    let vk_memory = unsafe { allocate_memory(&dev, allocation_size, memory_type_bits) }?;
-
-    // iterator gymnastics to avoid aliasing mut refs
-    let bind_image_memory_list = planes
-        .iter_mut()
-        .zip(bind_plane_image_memory_list.iter_mut())
-        .map(|(plane, bind_plane_image_memory)| {
-            vk::BindImageMemoryInfo {
-                image: vk_image,
-                memory: vk_memory,
-                memory_offset: u64::from(plane.offset),
-                ..default()
-            }
-            .push_next(bind_plane_image_memory)
-        })
-        .collect::<Box<[_]>>();
-    unsafe { dev.vk_device.bind_image_memory2(&bind_image_memory_list) }?;
+    let vk_memory = unsafe { allocate_memory(&dev, vk_image) }?;
+    unsafe { dev.vk_device.bind_image_memory(vk_image, vk_memory, 0) }?;
 
     let wgpu_texture = vk_texture_to_wgpu(&dev, vk_image, vk_memory, width, height, wgpu_format);
     Ok(DmabufTexture {
@@ -364,31 +350,31 @@ unsafe fn create_image(
     };
 
     let params = vk::ImageCreateInfo {
-        flags:
-            // We must bind each plane separately, since we need to know the
-            // memory offset of each plane. So we have one memory allocation but
-            // multiple image plane binds into that one allocation, at different
-            // offsets.
-            // This is because when we import a dmabuf in GTK, we need to
-            // specify the memory planes in the image; so we need to get each
-            // plane's offset ourselves.
-            vk::ImageCreateFlags::DISJOINT
-            // This prevents validation errors when using a single-planar
-            // `wgpu_format` with the `DISJOINT` flag.
-            //
-            // <https://registry.khronos.org/vulkan/specs/latest/man/html/VkImageCreateFlagBits.html>
-            // `VK_IMAGE_CREATE_ALIAS_BIT`
-            //
-            //     This flag further specifies that [...] a single-plane image
-            //     can share an in-memory non-linear representation with a plane
-            //     of a multi-planar disjoint image [...]
-            //
-            //     If the pNext chain includes a VkExternalMemoryImageCreateInfo
-            //     or VkExternalMemoryImageCreateInfoNV structure whose
-            //     handleTypes member is not 0 [which we do], it is as if
-            //     `VK_IMAGE_CREATE_ALIAS_BIT` is set.
-            //
-            | vk::ImageCreateFlags::ALIAS,
+        // flags:
+        //     // We must bind each plane separately, since we need to know the
+        //     // memory offset of each plane. So we have one memory allocation but
+        //     // multiple image plane binds into that one allocation, at different
+        //     // offsets.
+        //     // This is because when we import a dmabuf in GTK, we need to
+        //     // specify the memory planes in the image; so we need to get each
+        //     // plane's offset ourselves.
+        //     vk::ImageCreateFlags::DISJOINT
+        //     // This prevents validation errors when using a single-planar
+        //     // `wgpu_format` with the `DISJOINT` flag.
+        //     //
+        //     // <https://registry.khronos.org/vulkan/specs/latest/man/html/VkImageCreateFlagBits.html>
+        //     // `VK_IMAGE_CREATE_ALIAS_BIT`
+        //     //
+        //     //     This flag further specifies that [...] a single-plane image
+        //     //     can share an in-memory non-linear representation with a plane
+        //     //     of a multi-planar disjoint image [...]
+        //     //
+        //     //     If the pNext chain includes a VkExternalMemoryImageCreateInfo
+        //     //     or VkExternalMemoryImageCreateInfoNV structure whose
+        //     //     handleTypes member is not 0 [which we do], it is as if
+        //     //     `VK_IMAGE_CREATE_ALIAS_BIT` is set.
+        //     //
+        //     | vk::ImageCreateFlags::ALIAS,
         image_type: VK_DIM,
         format: vk_format,
         extent: vk::Extent3D {
@@ -437,33 +423,25 @@ unsafe fn create_image(
     ))
 }
 
-unsafe fn get_plane_memory_requirements(
-    dev: &Devices,
-    vk_image: vk::Image,
-    plane_aspect: vk::ImageAspectFlags,
-) -> vk::MemoryRequirements {
-    let mut image_plane_memory_requirements = vk::ImagePlaneMemoryRequirementsInfo {
-        plane_aspect,
-        ..default()
-    };
-    let image_memory_requirements = vk::ImageMemoryRequirementsInfo2 {
-        image: vk_image,
-        ..default()
-    }
-    .push_next(&mut image_plane_memory_requirements);
-    let mut out = vk::MemoryRequirements2::default();
-    unsafe {
-        dev.vk_device
-            .get_image_memory_requirements2(&image_memory_requirements, &mut out);
-    }
-    out.memory_requirements
-}
-
 unsafe fn allocate_memory(
     dev: &Devices,
-    allocation_size: vk::DeviceSize,
-    memory_type_bits: u32,
+    vk_image: vk::Image,
 ) -> Result<vk::DeviceMemory, BevyError> {
+    let memory_requirements = {
+        let image_memory_requirements = vk::ImageMemoryRequirementsInfo2 {
+            image: vk_image,
+            ..default()
+        };
+        let mut out = vk::MemoryRequirements2::default();
+        unsafe {
+            dev.vk_device
+                .get_image_memory_requirements2(&image_memory_requirements, &mut out);
+        }
+        out.memory_requirements
+    };
+    let allocation_size = memory_requirements.size;
+    let memory_type_bits = memory_requirements.memory_type_bits;
+
     // ask the device what memory types it has
     let memory_props = {
         let mut out = vk::PhysicalDeviceMemoryProperties2::default();
@@ -496,10 +474,10 @@ unsafe fn allocate_memory(
 
     // this memory will be bound to exactly one image
     // it's recommended to use a dedicated memory allocation for exported resources
-    // let mut with_dedicated = vk::MemoryDedicatedAllocateInfo {
-    //     image: vk_image,
-    //     ..default()
-    // };
+    let mut with_dedicated = vk::MemoryDedicatedAllocateInfo {
+        image: vk_image,
+        ..default()
+    };
     // this memory must be exportable
     let mut with_export = vk::ExportMemoryAllocateInfo {
         handle_types: MEMORY_HANDLE_TYPE,
@@ -511,8 +489,8 @@ unsafe fn allocate_memory(
         memory_type_index,
         ..default()
     }
-    .push_next(&mut with_export);
-    // .push_next(&mut with_dedicated);
+    .push_next(&mut with_export)
+    .push_next(&mut with_dedicated);
     Ok(unsafe { dev.vk_device.allocate_memory(&params, None) }?)
 }
 
@@ -583,6 +561,7 @@ fn vk_texture_to_wgpu(
 }
 
 fn format_to_fourcc(format: wgpu::TextureFormat) -> Option<DrmFourcc> {
+    // <https://registry.khronos.org/vulkan/specs/latest/man/html/VK_EXT_image_drm_format_modifier.html#_format_translation>
     use {DrmFourcc as Cc, wgpu::TextureFormat as Tf};
     match format {
         Tf::Rgba8Unorm | Tf::Rgba8UnormSrgb => Some(Cc::Abgr8888),

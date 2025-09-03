@@ -298,10 +298,7 @@ fn update_images(mut viewports: Query<&mut ViewportPrivate>, mut images: ResMut<
 
 fn texture_size(width: u32, height: u32) -> (u32, u32) {
     // TODO no rounding pls
-    (
-        width.max(512).div_ceil(64) * 64,
-        height.max(512).div_ceil(64) * 64,
-    )
+    (width.max(1), height.max(1))
 }
 
 // frame-to-frame rendering logic, in the render world
