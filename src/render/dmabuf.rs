@@ -4,6 +4,7 @@ use {
     bevy_utils::default,
     derive_more::{Debug, Deref},
     drm_fourcc::{DrmFormat, DrmFourcc, DrmModifier},
+    log::trace,
     std::os::fd::{AsRawFd as _, FromRawFd, OwnedFd},
 };
 
@@ -32,13 +33,7 @@ impl DmabufTexture {
         height: u32,
         format: wgpu::TextureFormat,
     ) -> Result<Self, BevyError> {
-        // SAFETY: `hal_adapter` is not manually destroyed by us
-        let hal_adapter = unsafe { adapter.as_hal::<wgpu_hal::vulkan::Api>() }
-            .expect("render adapter is not a Vulkan adapter");
-        // SAFETY: `hal_device` is not manually destroyed by us
-        let hal_device = unsafe { device.as_hal::<wgpu_hal::vulkan::Api>() }
-            .expect("render device is not a Vulkan device");
-        create_dmabuf_texture(&hal_adapter, device, &hal_device, width, height, format)
+        create_dmabuf_texture(adapter, device, width, height, format)
     }
 
     #[must_use]
@@ -81,6 +76,10 @@ impl DmabufTexture {
     /// Errors if [`DmabufTexture::open_fd`] or building the
     /// [`gdk::DmabufTexture`] fail.
     pub fn build_gdk_texture(&self) -> Result<gdk::Texture, BevyError> {
+        // The Gdk docs are completely useless for the parameters here.
+        // See the Linux userspace docs instead:
+        // <https://www.kernel.org/doc/html//latest/userspace-api/dma-buf-alloc-exchange.html>
+
         let fd = self.open_fd()?;
         let (width, height) = (self.width(), self.height());
         let builder = gdk::DmabufTextureBuilder::new()
@@ -103,13 +102,31 @@ impl DmabufTexture {
     }
 }
 
+const LABEL: &str = "bevy_gtk dmabuf texture";
+const VK_DIM: vk::ImageType = vk::ImageType::TYPE_2D;
+const WGPU_DIM: wgpu::TextureDimension = wgpu::TextureDimension::D2;
+const VK_TILING: vk::ImageTiling = vk::ImageTiling::DRM_FORMAT_MODIFIER_EXT;
+const MIP_LEVELS: u32 = 1;
+const VK_SAMPLES: vk::SampleCountFlags = vk::SampleCountFlags::TYPE_1;
+const WGPU_SAMPLES: u32 = 1;
 const MEMORY_HANDLE_TYPE: vk::ExternalMemoryHandleTypeFlags =
     vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT;
 
+fn vk_usage() -> vk::ImageUsageFlags {
+    vk::ImageUsageFlags::TRANSFER_SRC | vk::ImageUsageFlags::COLOR_ATTACHMENT
+}
+
+fn hal_usage() -> wgpu::TextureUses {
+    wgpu::TextureUses::COPY_SRC | wgpu::TextureUses::COLOR_TARGET
+}
+
+fn wgpu_usage() -> wgpu::TextureUsages {
+    wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::RENDER_ATTACHMENT
+}
+
 fn create_dmabuf_texture(
-    hal_adapter: &wgpu_hal::vulkan::Adapter,
+    wgpu_adapter: &wgpu::Adapter,
     wgpu_device: &wgpu::Device,
-    hal_device: &wgpu_hal::vulkan::Device,
     width: u32,
     height: u32,
     wgpu_format: wgpu::TextureFormat,
@@ -121,183 +138,262 @@ fn create_dmabuf_texture(
     // `vk::ImageTiling::DRM_FORMAT_MODIFIER_EXT`, but I think this is less
     // correct.
 
-    const LABEL: &str = "bevy_gtk dmabuf texture";
-    const DRM_MODIFIER_PLANE_COUNT: u32 = 1;
-    const VK_DIM: vk::ImageType = vk::ImageType::TYPE_2D;
-    const WGPU_DIM: wgpu::TextureDimension = wgpu::TextureDimension::D2;
-    const VK_TILING: vk::ImageTiling = vk::ImageTiling::DRM_FORMAT_MODIFIER_EXT;
-    const MIP_LEVELS: u32 = 1;
-    const VK_SAMPLES: vk::SampleCountFlags = vk::SampleCountFlags::TYPE_1;
-    const WGPU_SAMPLES: u32 = 1;
-    let vk_usage: vk::ImageUsageFlags =
-        vk::ImageUsageFlags::TRANSFER_SRC | vk::ImageUsageFlags::COLOR_ATTACHMENT;
-    let hal_usage: wgpu::TextureUses =
-        wgpu::TextureUses::COPY_SRC | wgpu::TextureUses::COLOR_TARGET;
-    let wgpu_usage: wgpu::TextureUsages =
-        wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::RENDER_ATTACHMENT;
+    // SAFETY: `hal_adapter` is not manually destroyed by us
+    let hal_adapter = unsafe { wgpu_adapter.as_hal::<wgpu_hal::vulkan::Api>() }
+        .expect("render adapter is not a Vulkan adapter");
+    // SAFETY: `hal_device` is not manually destroyed by us
+    let hal_device = unsafe { wgpu_device.as_hal::<wgpu_hal::vulkan::Api>() }
+        .expect("render device is not a Vulkan device");
 
-    let vk_instance = hal_device.shared_instance().raw_instance();
-    let vk_physical_device = hal_device.raw_physical_device();
-    let vk_device = hal_device.raw_device();
-
-    let vk_format = hal_adapter.texture_format_as_raw(wgpu_format);
-    let drm_format = format_to_fourcc(wgpu_format).ok_or_else(|| {
-        format!(
-            "texture format {wgpu_format:?} does not have a drm fourcc code and cannnot be used \
-             for a `DmabufTexture`"
-        )
-    })?;
-    let drm_modifier = DrmModifier::Linear;
-    let stride = width * u32::BITS / 8;
-
-    // check if we can use this modifier with this format
-
-    let Some(drm_modifier_info) =
-        get_drm_modifiers_for_format(vk_instance, vk_physical_device, vk_format)
-            .find(|info| info.modifier == drm_modifier)
-    else {
-        return Err(format!(
-            "modifier {drm_modifier:?} is not available for
-    {vk_format:?}"
-        )
-        .into());
+    let dev = Devices {
+        vk_instance: hal_device.shared_instance().raw_instance(),
+        hal_adapter: &hal_adapter,
+        vk_physical_device: hal_device.raw_physical_device(),
+        vk_device: hal_device.raw_device(),
+        hal_device: &hal_device,
+        wgpu_device,
     };
-    if drm_modifier_info.plane_count != DRM_MODIFIER_PLANE_COUNT {
-        return Err(format!(
-            "cannot use DRM modifier with more than 1 memory plane (has {}
-    planes)",
-            drm_modifier_info.plane_count
-        )
-        .into());
-    }
 
-    // if we make an image with this format and modifier, what properties does it
-    // have? make sure we fit within the limits
-    {
-        let mut with_drm_format_props = vk::PhysicalDeviceImageDrmFormatModifierInfoEXT {
-            drm_format_modifier: drm_modifier.into(),
-            sharing_mode: vk::SharingMode::EXCLUSIVE,
-            queue_family_index_count: 0,
-            ..default()
-        };
-        let params = vk::PhysicalDeviceImageFormatInfo2 {
-            format: vk_format,
-            ty: VK_DIM,
-            tiling: VK_TILING,
-            usage: vk_usage,
-            ..default()
-        }
-        .push_next(&mut with_drm_format_props);
-        let mut format_props = vk::ImageFormatProperties2::default();
+    let drm_format = format_to_fourcc(wgpu_format)
+        .ok_or_else(|| format!("texture format {wgpu_format:?} cannot be mapped to a fourcc"))?;
+
+    let vk_image = unsafe { create_image(&dev, width, height, wgpu_format) }?;
+    let vk_memory = unsafe { allocate_memory(&dev, vk_image) }?;
+    unsafe { dev.vk_device.bind_image_memory(vk_image, vk_memory, 0) }?;
+
+    // when we create the image, we give the GPU a list of what DRM modifiers it
+    // *could* use, but which one it chooses is implementation-specific.
+    // after creating the image, we query which modifier it actually chose.
+    let drm_modifier = unsafe { get_image_drm_modifier(&dev, vk_image) }?;
+
+    trace!(
+        "Using DRM format {drm_format}:0x{:016x} ({drm_modifier:?} vendor {:?})",
+        u64::from(drm_modifier),
+        drm_modifier.vendor(),
+    );
+
+    let wgpu_texture = vk_texture_to_wgpu(&dev, vk_image, vk_memory, width, height, wgpu_format);
+    Ok(DmabufTexture {
+        vk_instance: dev.vk_instance.clone(),
+        vk_device: dev.vk_device.clone(),
+        wgpu_texture,
+        vk_memory,
+        drm_format: DrmFormat {
+            code: drm_format,
+            modifier: drm_modifier,
+        },
+        stride: width * 4, // TODO
+    })
+}
+
+struct Devices<'a> {
+    vk_instance: &'a ash::Instance,
+    hal_adapter: &'a wgpu_hal::vulkan::Adapter,
+    vk_physical_device: ash::vk::PhysicalDevice,
+    vk_device: &'a ash::Device,
+    hal_device: &'a wgpu_hal::vulkan::Device,
+    wgpu_device: &'a wgpu::Device,
+}
+
+unsafe fn create_image(
+    dev: &Devices,
+    width: u32,
+    height: u32,
+    wgpu_format: wgpu::TextureFormat,
+) -> Result<vk::Image, BevyError> {
+    let vk_format = dev.hal_adapter.texture_format_as_raw(wgpu_format);
+
+    // for this texture format, figure out what DRM modifiers we can use
+    // we start by getting the number of modifiers `drm_modifier_count`
+    let drm_modifier_count = {
+        let mut drm_modifier_out = vk::DrmFormatModifierPropertiesList2EXT::default();
+        let mut format_out = vk::FormatProperties2::default().push_next(&mut drm_modifier_out);
         unsafe {
-            vk_instance.get_physical_device_image_format_properties2(
-                vk_physical_device,
-                &params,
-                &mut format_props,
-            )?;
+            dev.vk_instance.get_physical_device_format_properties2(
+                dev.vk_physical_device,
+                vk_format,
+                &mut format_out,
+            );
         }
-
-        let max_extent = format_props.image_format_properties.max_extent;
-        if width > max_extent.width {
-            return Err(format!("width too large: {width} / {}", max_extent.width).into());
-        }
-        if height > max_extent.height {
-            return Err(format!("height too large: {height} / {}", max_extent.height).into());
-        }
-    }
-
-    // create the vulkan image
-    let vk_image = {
-        // our image can be backed by external memory
-        let mut with_external_memory = vk::ExternalMemoryImageCreateInfo {
-            handle_types: MEMORY_HANDLE_TYPE,
-            ..default()
-        };
-        // image tiling is defined by a DRM format modifier
-        // right now, we only support modifiers with 1 memory plane
-        let plane_layouts = [vk::SubresourceLayout {
-            offset: 0,
-            size: 0,
-            row_pitch: u64::from(stride),
-            array_pitch: 0,
-            depth_pitch: 0,
-        }];
-        let mut with_drm_format_modifier = vk::ImageDrmFormatModifierExplicitCreateInfoEXT {
-            drm_format_modifier: drm_modifier.into(),
-            drm_format_modifier_plane_count: DRM_MODIFIER_PLANE_COUNT,
-            p_plane_layouts: (&raw const plane_layouts).cast(),
-            ..default()
-        };
-        let params = vk::ImageCreateInfo {
-            image_type: VK_DIM,
-            format: vk_format,
-            extent: vk::Extent3D {
-                width,
-                height,
-                depth: 1,
-            },
-            mip_levels: MIP_LEVELS,
-            array_layers: 1,
-            samples: VK_SAMPLES,
-            tiling: vk::ImageTiling::DRM_FORMAT_MODIFIER_EXT,
-            usage: vk_usage,
-            sharing_mode: vk::SharingMode::EXCLUSIVE,
-            initial_layout: vk::ImageLayout::UNDEFINED,
-            ..default()
-        }
-        .push_next(&mut with_drm_format_modifier)
-        .push_next(&mut with_external_memory);
-        unsafe { vk_device.create_image(&params, None) }?
+        drm_modifier_out.drm_format_modifier_count
     };
 
-    // to allocate memory for the image, we get what requirements the memory has for
-    // this image
+    // then allocate a buffer for `drm_modifier_count` number of modifier props
+    // and get info for those modifiers
+    let drm_modifiers = {
+        let mut buf = (0..drm_modifier_count)
+            .map(|_| default())
+            .collect::<Box<[_]>>();
+        let mut drm_modifier_out = vk::DrmFormatModifierPropertiesList2EXT {
+            drm_format_modifier_count: drm_modifier_count,
+            p_drm_format_modifier_properties: buf.as_mut_ptr(),
+            ..default()
+        };
+        let mut format_out = vk::FormatProperties2::default().push_next(&mut drm_modifier_out);
+        unsafe {
+            dev.vk_instance.get_physical_device_format_properties2(
+                dev.vk_physical_device,
+                vk_format,
+                &mut format_out,
+            );
+        }
+        buf.into_iter()
+            .map(|props| DrmModifier::from(props.drm_format_modifier))
+            .collect::<Box<[_]>>()
+    };
+
+    // TODO
+    let drm_modifiers = [DrmModifier::Linear];
+
+    trace!("Available DRM format modifiers");
+    for modifier in &drm_modifiers {
+        trace!(
+            "- 0x{:016x} ({modifier:?} vendor {:?})",
+            u64::from(*modifier),
+            modifier.vendor()
+        );
+    }
+
+    // we tell the device that we can make an image with any of the above modifiers,
+    // we're not picky
+    // let mut with_drm_modifiers = vk::ImageDrmFormatModifierListCreateInfoEXT {
+    //     drm_format_modifier_count: drm_modifiers.len() as u32,
+    //     p_drm_format_modifiers: drm_modifiers.as_ptr().cast(),
+    //     ..default()
+    // };
+
+    let plane_layouts = [vk::SubresourceLayout {
+        offset: 0,
+        size: 0,
+        row_pitch: u64::from(width * 4),
+        array_pitch: 0,
+        depth_pitch: 0,
+    }];
+    let mut with_drm_modifiers = vk::ImageDrmFormatModifierExplicitCreateInfoEXT {
+        drm_format_modifier: 0,
+        drm_format_modifier_plane_count: 1,
+        p_plane_layouts: (&raw const plane_layouts).cast(),
+        ..default()
+    };
+
+    // our image can be backed by external memory
+    let mut with_external_memory = vk::ExternalMemoryImageCreateInfo {
+        handle_types: MEMORY_HANDLE_TYPE,
+        ..default()
+    };
+    let params = vk::ImageCreateInfo {
+        image_type: VK_DIM,
+        format: vk_format,
+        extent: vk::Extent3D {
+            width,
+            height,
+            depth: 1,
+        },
+        mip_levels: MIP_LEVELS,
+        array_layers: 1,
+        samples: VK_SAMPLES,
+        tiling: VK_TILING,
+        usage: vk_usage(),
+        sharing_mode: vk::SharingMode::EXCLUSIVE,
+        initial_layout: vk::ImageLayout::UNDEFINED,
+        ..default()
+    }
+    .push_next(&mut with_drm_modifiers)
+    .push_next(&mut with_external_memory);
+    Ok(unsafe { dev.vk_device.create_image(&params, None) }?)
+}
+
+unsafe fn get_image_drm_modifier(
+    dev: &Devices,
+    vk_image: vk::Image,
+) -> Result<DrmModifier, BevyError> {
+    let mut out = vk::ImageDrmFormatModifierPropertiesEXT::default();
+    let device = ash::ext::image_drm_format_modifier::Device::new(dev.vk_instance, dev.vk_device);
+    unsafe { device.get_image_drm_format_modifier_properties(vk_image, &mut out) }?;
+    Ok(DrmModifier::from(out.drm_format_modifier))
+}
+
+unsafe fn allocate_memory(
+    dev: &Devices,
+    vk_image: vk::Image,
+) -> Result<vk::DeviceMemory, BevyError> {
+    // ask the device what memory specs (size etc.) are required for this image
     let memory_requirements = {
-        // memory requirements are based on the image we just made
         let params = vk::ImageMemoryRequirementsInfo2 {
             image: vk_image,
             ..default()
         };
-
         let mut out = vk::MemoryRequirements2::default();
         unsafe {
-            vk_device.get_image_memory_requirements2(&params, &mut out);
+            dev.vk_device
+                .get_image_memory_requirements2(&params, &mut out);
         }
-        out
+        out.memory_requirements
     };
 
-    let vk_memory = {
-        // TODO
-        let memory_type =
-            find_memory_type(memory_requirements.memory_requirements.memory_type_bits);
-
-        // this memory will be bound to exactly one image
-        let mut with_dedicated = vk::MemoryDedicatedAllocateInfo {
-            image: vk_image,
-            ..default()
-        };
-        // this memory must be exportable
-        let mut with_export = vk::ExportMemoryAllocateInfo {
-            handle_types: MEMORY_HANDLE_TYPE,
-            ..default()
-        };
-
-        let params = vk::MemoryAllocateInfo {
-            allocation_size: memory_requirements.memory_requirements.size,
-            memory_type_index: memory_type,
-            ..default()
+    // ask the device what memory types it has
+    let memory_props = {
+        let mut out = vk::PhysicalDeviceMemoryProperties2::default();
+        unsafe {
+            dev.vk_instance
+                .get_physical_device_memory_properties2(dev.vk_physical_device, &mut out);
         }
-        .push_next(&mut with_export)
-        .push_next(&mut with_dedicated);
-        unsafe { vk_device.allocate_memory(&params, None) }?
+        out.memory_properties
     };
 
-    unsafe { vk_device.bind_image_memory(vk_image, vk_memory, 0) }?;
+    // given what memory types the device has (`memory_props`),
+    // and what kinds we can use for our image allocation (`memory_type_bits`),
+    // figure out what memory type index in that bitset is best for us
+    let memory_type_bits = memory_requirements.memory_type_bits;
+    let memory_type_index = (0..memory_props.memory_type_count).find(|index| {
+        if memory_type_bits & (1 << index) == 0 {
+            return false;
+        }
 
-    // make wgpu resources out of vulkan resources
+        let memory_type_props = memory_props.memory_types[*index as usize].property_flags;
+        // we want a memory type which is visible on the CPU as well
+        // since the CPU will likely need to copy it through GTK
+        // TODO: maybe not?
+        memory_type_props.contains(
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+        )
+    });
+    let Some(memory_type_index) = memory_type_index else {
+        return Err("no compatible memory type found".into());
+    };
 
+    // this memory will be bound to exactly one image
+    // it's recommended to use a dedicated memory allocation for exported resources
+    let mut with_dedicated = vk::MemoryDedicatedAllocateInfo {
+        image: vk_image,
+        ..default()
+    };
+    // this memory must be exportable
+    let mut with_export = vk::ExportMemoryAllocateInfo {
+        handle_types: MEMORY_HANDLE_TYPE,
+        ..default()
+    };
+
+    let params = vk::MemoryAllocateInfo {
+        allocation_size: memory_requirements.size,
+        memory_type_index,
+        ..default()
+    }
+    .push_next(&mut with_export)
+    .push_next(&mut with_dedicated);
+    Ok(unsafe { dev.vk_device.allocate_memory(&params, None) }?)
+}
+
+fn vk_texture_to_wgpu(
+    dev: &Devices,
+    vk_image: vk::Image,
+    vk_memory: vk::DeviceMemory,
+    width: u32,
+    height: u32,
+    wgpu_format: wgpu::TextureFormat,
+) -> wgpu::Texture {
     let hal_texture = {
-        let descriptor_hal = wgpu_hal::TextureDescriptor {
+        let hal_descriptor = wgpu_hal::TextureDescriptor {
             label: Some(LABEL),
             size: wgpu::Extent3d {
                 width,
@@ -308,18 +404,25 @@ fn create_dmabuf_texture(
             sample_count: WGPU_SAMPLES,
             dimension: WGPU_DIM,
             format: wgpu_format,
-            usage: hal_usage,
+            usage: hal_usage(),
             memory_flags: wgpu_hal::MemoryFlags::empty(),
             view_formats: Vec::new(),
         };
         let drop_callback = {
-            let vk_device = vk_device.clone();
+            let vk_device = dev.vk_device.clone();
             Box::new(move || unsafe {
                 vk_device.destroy_image(vk_image, None);
                 vk_device.free_memory(vk_memory, None);
             })
         };
-        unsafe { hal_device.texture_from_raw(vk_image, &descriptor_hal, Some(drop_callback)) }
+        // SAFETY:
+        // - `vk_image` was created with the same descriptor as `hal_descriptor`
+        // - we move `vk_image` into the `drop_callback`, and destroy it on drop
+        // - `view_formats` is empty
+        unsafe {
+            dev.hal_device
+                .texture_from_raw(vk_image, &hal_descriptor, Some(drop_callback))
+        }
     };
 
     // SAFETY:
@@ -327,109 +430,26 @@ fn create_dmabuf_texture(
     // - `hal_texture`'s descriptor is the same as the descriptor we're making now,
     //   enforced via the `VK_` and `WGPU_` variable parity
     // - `hal_texture` has just been initialized
-    let wgpu_texture = unsafe {
-        wgpu_device.create_texture_from_hal::<wgpu_hal::vulkan::Api>(
-            hal_texture,
-            &wgpu::TextureDescriptor {
-                label: Some(LABEL),
-                size: wgpu::Extent3d {
-                    width,
-                    height,
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: MIP_LEVELS,
-                sample_count: WGPU_SAMPLES,
-                dimension: WGPU_DIM,
-                format: wgpu_format,
-                usage: wgpu_usage,
-                view_formats: &[],
-            },
-        )
-    };
-
-    Ok(DmabufTexture {
-        vk_instance: vk_instance.clone(),
-        vk_device: vk_device.clone(),
-        wgpu_texture,
-        vk_memory,
-        drm_format: DrmFormat {
-            code: drm_format,
-            modifier: drm_modifier,
-        },
-        stride,
-    })
-}
-
-#[derive(Debug)]
-struct DrmModifierInfo {
-    modifier: DrmModifier,
-    plane_count: u32,
-}
-
-fn get_drm_modifiers_for_format(
-    vk_instance: &ash::Instance,
-    vk_physical_device: vk::PhysicalDevice,
-    vk_format: vk::Format,
-) -> impl Iterator<Item = DrmModifierInfo> {
-    let modifier_count = {
-        let mut drm_modifier_props = vk::DrmFormatModifierPropertiesList2EXT::default();
-        let mut format_props = vk::FormatProperties2::default().push_next(&mut drm_modifier_props);
-        unsafe {
-            vk_instance.get_physical_device_format_properties2(
-                vk_physical_device,
-                vk_format,
-                &mut format_props,
-            );
-        }
-        drm_modifier_props.drm_format_modifier_count
-    };
-
-    let mut drm_modifiers = {
-        let mut buf = Vec::new();
-        buf.resize_with(modifier_count as usize, Default::default);
-        buf.into_boxed_slice()
-    };
-    let mut drm_modifier_props = vk::DrmFormatModifierPropertiesList2EXT {
-        drm_format_modifier_count: modifier_count,
-        p_drm_format_modifier_properties: drm_modifiers.as_mut_ptr(),
-        ..default()
-    };
-    let mut format_props = vk::FormatProperties2::default().push_next(&mut drm_modifier_props);
     unsafe {
-        vk_instance.get_physical_device_format_properties2(
-            vk_physical_device,
-            vk_format,
-            &mut format_props,
-        );
+        dev.wgpu_device
+            .create_texture_from_hal::<wgpu_hal::vulkan::Api>(
+                hal_texture,
+                &wgpu::TextureDescriptor {
+                    label: Some(LABEL),
+                    size: wgpu::Extent3d {
+                        width,
+                        height,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: MIP_LEVELS,
+                    sample_count: WGPU_SAMPLES,
+                    dimension: WGPU_DIM,
+                    format: wgpu_format,
+                    usage: wgpu_usage(),
+                    view_formats: &[],
+                },
+            )
     }
-
-    (0..modifier_count).map(move |i| {
-        let format_props = unsafe {
-            *drm_modifier_props
-                .p_drm_format_modifier_properties
-                .add(i as usize)
-        };
-
-        DrmModifierInfo {
-            modifier: DrmModifier::from(format_props.drm_format_modifier),
-            plane_count: format_props.drm_format_modifier_plane_count,
-        }
-    })
-}
-
-fn find_memory_type(type_bits: u32) -> u32 {
-    for index in 0..32 {
-        if type_bits & (1 << index) == 0 {
-            continue;
-        }
-
-        // TODO
-
-        return index;
-    }
-
-    // TODO
-    panic!("uh oh");
 }
 
 fn format_to_fourcc(format: wgpu::TextureFormat) -> Option<DrmFourcc> {
