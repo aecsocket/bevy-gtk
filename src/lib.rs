@@ -38,8 +38,10 @@ mod window;
 pub use adw;
 pub use {gdk, gio, gtk, window::*};
 
-#[cfg(feature = "render")]
-pub mod render;
+#[cfg(feature = "viewport")]
+pub mod viewport;
+#[cfg(feature = "viewport")]
+pub use viewport::*;
 
 /// Initialization plugin for [`GtkPlugin`].
 ///
@@ -52,8 +54,8 @@ pub struct GtkInitPlugin;
 
 impl Plugin for GtkInitPlugin {
     fn build(&self, app: &mut App) {
-        #[cfg(feature = "render")]
-        render::init_plugin(app);
+        #[cfg(feature = "viewport")]
+        viewport::init_plugin(app);
     }
 }
 
@@ -137,8 +139,8 @@ impl Plugin for GtkPlugin {
             "add `GtkInitPlugin` before `GtkPlugin`"
         );
 
-        #[cfg(feature = "render")]
-        render::plugin(app);
+        #[cfg(feature = "viewport")]
+        viewport::plugin(app);
 
         let gtk_app = if_adw!(
             self.use_adw,
@@ -147,7 +149,7 @@ impl Plugin for GtkPlugin {
             gtk::Application::new(self.app_id.as_deref(), self.app_flags),
         );
         // prevent app closing when there are no windows;
-        // this is `bevy_window`'s responsibility
+        // this becomes `bevy_window`'s responsibility
         let app_hold = gtk_app.hold();
 
         let (tx_activated, rx_activated) = oneshot::channel::<()>();
@@ -168,9 +170,6 @@ impl Plugin for GtkPlugin {
             .recv()
             .expect("channel dropped while activating GTK app");
         debug!("App activated");
-
-        #[cfg(feature = "render")]
-        render::post_activate(app);
 
         app.add_plugins(window::plugin)
             .insert_non_send_resource(app_hold)

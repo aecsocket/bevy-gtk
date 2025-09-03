@@ -1,13 +1,33 @@
 use {
     arrayvec::ArrayVec,
     ash::vk,
+    bevy_app::prelude::*,
     bevy_ecs::error::BevyError,
+    bevy_render::renderer::raw_vulkan_init::RawVulkanInitSettings,
     bevy_utils::default,
     derive_more::{Debug, Deref},
     drm_fourcc::{DrmFormat, DrmFourcc, DrmModifier},
     log::trace,
     std::os::fd::{AsRawFd as _, FromRawFd, OwnedFd},
 };
+
+pub(super) fn init_plugin(app: &mut App) {
+    let mut raw_vulkan_settings = app
+        .world_mut()
+        .get_resource_or_init::<RawVulkanInitSettings>();
+
+    // SAFETY: we do not remove any features or functionality
+    unsafe {
+        raw_vulkan_settings.add_create_device_callback(|args, _, _| {
+            args.extensions.extend_from_slice(&[
+                ash::khr::external_memory::NAME,
+                ash::khr::external_memory_fd::NAME,
+                ash::ext::image_drm_format_modifier::NAME,
+                ash::ext::external_memory_dma_buf::NAME,
+            ]);
+        });
+    }
+}
 
 /// [`wgpu::Texture`] which is backed by DMA buffers.
 ///
@@ -198,35 +218,38 @@ fn create_dmabuf_texture(
         drm_modifier.vendor(),
     );
 
-    let mut planes = ArrayVec::new();
-    for plane_index in 0..plane_count {
-        let plane_aspect = match plane_index {
-            0 => vk::ImageAspectFlags::MEMORY_PLANE_0_EXT,
-            1 => vk::ImageAspectFlags::MEMORY_PLANE_1_EXT,
-            2 => vk::ImageAspectFlags::MEMORY_PLANE_2_EXT,
-            3 => vk::ImageAspectFlags::MEMORY_PLANE_3_EXT,
-            _ => panic!("there should be no more than 4 memory planes"),
-        };
+    // read MEMORY plane info for each plane, to figure out the offset to give
+    // to the dmabuf importer (GTK)
+    let planes = (0..plane_count)
+        .map(|plane_index| {
+            let plane_aspect = match plane_index {
+                0 => vk::ImageAspectFlags::MEMORY_PLANE_0_EXT,
+                1 => vk::ImageAspectFlags::MEMORY_PLANE_1_EXT,
+                2 => vk::ImageAspectFlags::MEMORY_PLANE_2_EXT,
+                3 => vk::ImageAspectFlags::MEMORY_PLANE_3_EXT,
+                _ => panic!("there should be no more than 4 memory planes"),
+            };
 
-        let subresource = vk::ImageSubresource {
-            aspect_mask: plane_aspect,
-            mip_level: 0,
-            array_layer: 0,
-        };
-        let subresource_layout = unsafe {
-            dev.vk_device
-                .get_image_subresource_layout(vk_image, subresource)
-        };
+            let subresource = vk::ImageSubresource {
+                aspect_mask: plane_aspect,
+                mip_level: 0,
+                array_layer: 0,
+            };
+            let subresource_layout = unsafe {
+                dev.vk_device
+                    .get_image_subresource_layout(vk_image, subresource)
+            };
 
-        let offset = subresource_layout.offset;
-        let row_pitch = subresource_layout.row_pitch;
-        trace!("Plane {plane_index} has offset {offset} stride/row pitch {row_pitch}");
+            let offset = subresource_layout.offset;
+            let row_pitch = subresource_layout.row_pitch;
+            trace!("Plane {plane_index} has offset {offset} stride/row pitch {row_pitch}");
 
-        planes.push(DmabufPlane {
-            offset: u32::try_from(offset).expect("offset too large"),
-            stride: u32::try_from(row_pitch).expect("stride too large"),
-        });
-    }
+            DmabufPlane {
+                offset: u32::try_from(offset).expect("offset too large"),
+                stride: u32::try_from(row_pitch).expect("stride too large"),
+            }
+        })
+        .collect();
 
     let vk_memory = unsafe { allocate_memory(&dev, vk_image) }?;
     unsafe { dev.vk_device.bind_image_memory(vk_image, vk_memory, 0) }?;
@@ -350,31 +373,6 @@ unsafe fn create_image(
     };
 
     let params = vk::ImageCreateInfo {
-        // flags:
-        //     // We must bind each plane separately, since we need to know the
-        //     // memory offset of each plane. So we have one memory allocation but
-        //     // multiple image plane binds into that one allocation, at different
-        //     // offsets.
-        //     // This is because when we import a dmabuf in GTK, we need to
-        //     // specify the memory planes in the image; so we need to get each
-        //     // plane's offset ourselves.
-        //     vk::ImageCreateFlags::DISJOINT
-        //     // This prevents validation errors when using a single-planar
-        //     // `wgpu_format` with the `DISJOINT` flag.
-        //     //
-        //     // <https://registry.khronos.org/vulkan/specs/latest/man/html/VkImageCreateFlagBits.html>
-        //     // `VK_IMAGE_CREATE_ALIAS_BIT`
-        //     //
-        //     //     This flag further specifies that [...] a single-plane image
-        //     //     can share an in-memory non-linear representation with a plane
-        //     //     of a multi-planar disjoint image [...]
-        //     //
-        //     //     If the pNext chain includes a VkExternalMemoryImageCreateInfo
-        //     //     or VkExternalMemoryImageCreateInfoNV structure whose
-        //     //     handleTypes member is not 0 [which we do], it is as if
-        //     //     `VK_IMAGE_CREATE_ALIAS_BIT` is set.
-        //     //
-        //     | vk::ImageCreateFlags::ALIAS,
         image_type: VK_DIM,
         format: vk_format,
         extent: vk::Extent3D {
@@ -463,7 +461,8 @@ unsafe fn allocate_memory(
         let memory_type_props = memory_props.memory_types[*index as usize].property_flags;
         // we want a memory type which is visible on the CPU as well
         // since the CPU will likely need to copy it through GTK
-        // TODO: maybe not?
+        // Testing this vs `DEVICE_LOCAL`, this set of flags seems to have
+        // slightly better performance. But this warrants more profiling.
         memory_type_props.contains(
             vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
         )

@@ -44,7 +44,6 @@
 //! different sizes.
 
 use {
-    crate::render::DmabufTexture,
     alloc::sync::Arc,
     atomic_float::AtomicF64,
     atomicbox::AtomicOptionBox,
@@ -68,11 +67,19 @@ use {
         mem,
         sync::atomic::{self, AtomicU32},
     },
+    gdk::prelude::*,
     glib::clone,
     gtk::prelude::*,
     log::{debug, trace},
     wgpu::{Extent3d, TextureDimension, TextureFormat, TextureUsages, TextureViewDescriptor},
 };
+
+mod dmabuf;
+pub use dmabuf::*;
+
+pub(super) fn init_plugin(app: &mut App) {
+    dmabuf::init_plugin(app);
+}
 
 pub(super) fn plugin(app: &mut App) {
     app.add_plugins(ExtractComponentPlugin::<RenderViewport>::default())
@@ -297,7 +304,6 @@ fn update_images(mut viewports: Query<&mut ViewportPrivate>, mut images: ResMut<
 }
 
 fn texture_size(width: u32, height: u32) -> (u32, u32) {
-    // TODO no rounding pls
     (width.max(1), height.max(1))
 }
 

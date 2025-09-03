@@ -5,6 +5,7 @@ use {
     bevy_platform::collections::{HashMap, hash_map::Entry},
     bevy_window::{
         ClosingWindow, Window, WindowCloseRequested, WindowClosed, WindowClosing, WindowCreated,
+        WindowMode,
     },
     core::mem,
     gtk::prelude::*,
@@ -17,7 +18,8 @@ pub(super) fn plugin(app: &mut App) {
         (
             create_bevy_to_gtk,
             despawn,
-            sync_bevy_to_gtk,
+            sync_new_content,
+            sync_window_config,
             sync_gtk_to_bevy,
         )
             .chain(),
@@ -54,7 +56,7 @@ impl GtkWindows {
 pub struct WindowProxy {
     pub gtk: gtk::ApplicationWindow,
     content: gtk::Widget,
-    cache: Window,
+    cache: Option<Window>,
     rx_close_request: async_channel::Receiver<()>,
 }
 
@@ -123,14 +125,7 @@ pub(super) fn create_bevy_to_gtk(
         let mut proxy = WindowProxy {
             gtk: gtk_window,
             content: gtk::Label::new(None).upcast(),
-            cache: Window {
-                // negate cache values to force a widget tree rebuild
-                titlebar_shown: !bevy_window.titlebar_shown,
-                titlebar_transparent: !bevy_window.titlebar_transparent,
-                titlebar_show_title: !bevy_window.titlebar_show_title,
-                titlebar_show_buttons: !bevy_window.titlebar_show_buttons,
-                ..bevy_window.clone()
-            },
+            cache: None,
             rx_close_request,
         };
         sync_one(gtk_windows.use_adw, bevy_window, &mut proxy);
@@ -141,12 +136,12 @@ pub(super) fn create_bevy_to_gtk(
     }
 }
 
-pub fn sync_bevy_to_gtk(
+pub fn sync_new_content(
     mut commands: Commands,
-    mut changed_windows: Query<(Entity, &Window, Option<&mut GtkWindowContent>), Changed<Window>>,
+    mut changed_windows: Query<(Entity, Option<&mut GtkWindowContent>), Changed<GtkWindowContent>>,
     mut gtk_windows: NonSendMut<GtkWindows>,
 ) {
-    for (entity, bevy_window, mut new_window_content) in &mut changed_windows {
+    for (entity, mut new_window_content) in &mut changed_windows {
         let gtk_windows = &mut *gtk_windows;
         let Some(proxy) = gtk_windows.entity_to_proxy.get_mut(&entity) else {
             continue;
@@ -158,60 +153,92 @@ pub fn sync_bevy_to_gtk(
             }
             commands.entity(entity).remove::<GtkWindowContent>();
         }
+    }
+}
+
+pub fn sync_window_config(
+    mut changed_windows: Query<(Entity, &Window), Changed<Window>>,
+    mut gtk_windows: NonSendMut<GtkWindows>,
+) {
+    for (entity, bevy_window) in &mut changed_windows {
+        let gtk_windows = &mut *gtk_windows;
+        let Some(proxy) = gtk_windows.entity_to_proxy.get_mut(&entity) else {
+            continue;
+        };
 
         sync_one(gtk_windows.use_adw, bevy_window, proxy);
     }
 }
 
-fn sync_one(use_adw: bool, bevy_window: &Window, proxy: &mut WindowProxy) {
-    fn cmp_ex(dst: &mut bool, src: bool) -> bool {
-        if *dst == src {
-            false
-        } else {
-            *dst = src;
-            true
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "small numbers; truncation is fine"
+)]
+fn sync_one(use_adw: bool, new: &Window, proxy: &mut WindowProxy) {
+    let cache = proxy.cache.as_ref();
+    let gtk_window = &proxy.gtk;
+
+    if cache.is_none_or(|c| c.mode != new.mode) {
+        match new.mode {
+            WindowMode::Windowed => gtk_window.set_fullscreened(false),
+            WindowMode::BorderlessFullscreen(_) => gtk_window.fullscreen(),
+            WindowMode::Fullscreen(_, _) => {}
         }
     }
 
-    let gtk_window = &proxy.gtk;
-    gtk_window.set_title(Some(&bevy_window.title));
-
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "small numbers; truncation is fine"
-    )]
-    {
-        gtk_window.set_width_request(bevy_window.resize_constraints.min_width as i32);
-        gtk_window.set_height_request(bevy_window.resize_constraints.min_height as i32);
-        gtk_window.set_default_width(bevy_window.resolution.width() as i32);
-        gtk_window.set_default_height(bevy_window.resolution.height() as i32);
+    if cache.is_none_or(|c| c.title != new.title) {
+        gtk_window.set_title(Some(&new.title));
     }
 
-    let rebuild_widgets = cmp_ex(&mut proxy.cache.titlebar_shown, bevy_window.titlebar_shown)
-        || cmp_ex(
-            &mut proxy.cache.titlebar_transparent,
-            bevy_window.titlebar_transparent,
-        )
-        || cmp_ex(
-            &mut proxy.cache.titlebar_show_title,
-            bevy_window.titlebar_show_title,
-        )
-        || cmp_ex(
-            &mut proxy.cache.titlebar_show_buttons,
-            bevy_window.titlebar_show_buttons,
-        );
+    // `set_default_width/height` MUST be called before `set_width/height_request`,
+    // or the window size will be wrong on startup
+    if cache.is_none_or(|c| c.resolution != new.resolution) {
+        gtk_window.set_default_width(new.resolution.width() as i32);
+        gtk_window.set_default_height(new.resolution.height() as i32);
+    }
+
+    if cache.is_none_or(|c| c.resize_constraints != new.resize_constraints) {
+        gtk_window.set_width_request(new.resize_constraints.min_width as i32);
+        gtk_window.set_height_request(new.resize_constraints.min_height as i32);
+    }
+
+    if cache.is_none_or(|c| c.resizable != new.resizable) {
+        gtk_window.set_resizable(new.resizable);
+    }
+
+    // TODO: IME
+
+    #[cfg(feature = "adwaita")]
+    if cache.is_none_or(|c| c.window_theme != new.window_theme) {
+        use bevy_window::WindowTheme;
+
+        adw::StyleManager::default().set_color_scheme(match new.window_theme {
+            None => adw::ColorScheme::Default,
+            Some(WindowTheme::Light) => adw::ColorScheme::ForceLight,
+            Some(WindowTheme::Dark) => adw::ColorScheme::ForceDark,
+        });
+    }
+
+    let rebuild_widgets = cache.is_none_or(|c| {
+        c.titlebar_shown != new.titlebar_shown
+            || c.titlebar_transparent != new.titlebar_transparent
+            || c.titlebar_show_title != new.titlebar_show_title
+            || c.titlebar_show_buttons != new.titlebar_show_buttons
+    });
     if rebuild_widgets {
         if_adw!(
             use_adw,
             if let Some(adw_window) = proxy.gtk.downcast_ref::<adw::ApplicationWindow>() {
                 use adw::prelude::*;
 
-                let content_root = adw_content_root(bevy_window, &proxy.content);
+                let content_root = adw_content_root(new, &proxy.content);
                 adw_window.set_content(Some(&content_root));
             },
             proxy.gtk.set_child(Some(&proxy.content)),
         );
     }
+
+    proxy.cache = Some(new.clone());
 }
 
 fn replace_content(old: &gtk::Widget, new: Option<&gtk::Widget>) {
@@ -247,28 +274,29 @@ fn replace_content(old: &gtk::Widget, new: Option<&gtk::Widget>) {
 }
 
 #[cfg(feature = "adwaita")]
-fn adw_content_root(bevy_window: &Window, content: &gtk::Widget) -> gtk::Widget {
+fn adw_content_root(config: &Window, content: &gtk::Widget) -> gtk::Widget {
     // ensure `proxy.content` has no parent before we add it to a new parent
     replace_content(content, None);
 
-    if bevy_window.titlebar_shown {
-        if bevy_window.titlebar_transparent {
-            if bevy_window.titlebar_show_buttons {
+    if config.titlebar_shown {
+        if config.titlebar_transparent {
+            if config.titlebar_show_buttons {
                 // same margin as `adw::HeaderBar`
                 const MARGIN: i32 = 6;
 
-                let window_controls = gtk::WindowControls::builder()
-                    .side(gtk::PackType::End)
-                    .halign(gtk::Align::End)
-                    .valign(gtk::Align::Start)
+                let header_box = gtk::Box::builder()
                     .margin_start(MARGIN)
                     .margin_end(MARGIN)
                     .margin_top(MARGIN)
                     .margin_bottom(MARGIN)
+                    .valign(gtk::Align::Start)
                     .build();
+                header_box.append(&gtk::WindowControls::new(gtk::PackType::Start));
+                header_box.append(&gtk::Box::builder().hexpand(true).build());
+                header_box.append(&gtk::WindowControls::new(gtk::PackType::End));
 
                 let overlay = gtk::Overlay::new();
-                overlay.add_overlay(&window_controls);
+                overlay.add_overlay(&header_box);
                 overlay.set_child(Some(content));
                 overlay.upcast()
             } else {
@@ -276,10 +304,10 @@ fn adw_content_root(bevy_window: &Window, content: &gtk::Widget) -> gtk::Widget 
             }
         } else {
             let header = adw::HeaderBar::new();
-            if !bevy_window.titlebar_show_title {
+            if !config.titlebar_show_title {
                 header.set_title_widget(Some(&gtk::Label::new(None)));
             }
-            if !bevy_window.titlebar_show_buttons {
+            if !config.titlebar_show_buttons {
                 header.set_show_start_title_buttons(false);
                 header.set_show_end_title_buttons(false);
             }

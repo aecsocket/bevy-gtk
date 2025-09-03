@@ -1,7 +1,7 @@
 use {
     adw::prelude::*,
     bevy::{prelude::*, window::PrimaryWindow, winit::WinitPlugin},
-    bevy_gtk::{GtkInitPlugin, GtkPlugin, GtkWindowContent, render::GtkViewports},
+    bevy_gtk::{GtkInitPlugin, GtkPlugin, GtkViewports, GtkWindowContent},
 };
 
 const APP_ID: &str = "io.github.aecsocket.BevyGtk";

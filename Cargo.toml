@@ -21,22 +21,23 @@ std_instead_of_alloc  = "warn"
 std_instead_of_core   = "warn"
 unwrap_used           = "warn"
 
-missing_const_for_fn    = "allow"
-missing_errors_doc      = "allow"
-missing_panics_doc      = "allow"
-needless_pass_by_value  = "allow"
-option_if_let_else      = "allow"
-redundant_pub_crate     = "allow"
-similar_names           = "allow"
-too_many_arguments      = "allow"
-type_complexity         = "allow"
+missing_const_for_fn   = "allow"
+missing_errors_doc     = "allow"
+missing_panics_doc     = "allow"
+needless_pass_by_value = "allow"
+option_if_let_else     = "allow"
+redundant_pub_crate    = "allow"
+similar_names          = "allow"
+too_many_arguments     = "allow"
+too_many_lines         = "allow"
+type_complexity        = "allow"
 
 [features]
-default = ["render"]
+default = ["viewport"]
 
 adwaita = ["dep:adw"]
 blueprint = ["gtk/blueprint"]
-render = [
+viewport = [
   "bevy_render/raw_vulkan_init",
   "dep:arrayvec",
   "dep:ash",
@@ -53,25 +54,34 @@ render = [
 ]
 
 [dependencies]
+
+# Bevy
+
 bevy_app = { version = "0.17.0-dev", default-features = false }
 bevy_ecs = { version = "0.17.0-dev", default-features = false }
-bevy_platform = { version = "0.17.0-dev", default-features = false, features = [
-  "alloc",
-] }
 bevy_utils = { version = "0.17.0-dev", default-features = false }
 bevy_window = { version = "0.17.0-dev", default-features = false }
 
+bevy_platform = { version = "0.17.0-dev", default-features = false, features = [
+  "alloc",
+] }
+
+# Required
+
 async-channel = { version = "2.5" }
+gdk           = { package = "gdk4", version = "0.10", features = ["v4_14"] }
+gio           = { version = "0.21" }
+glib          = { version = "0.21" }
+gtk           = { package = "gtk4", version = "0.10", features = ["v4_16"] }
+log           = { version = "0.4" }
+oneshot       = { version = "0.1" }
+
 derive_more = { version = "2.0", default-features = false, features = [
   "deref",
   "debug",
 ] }
-gdk = { package = "gdk4", version = "0.10", features = ["v4_14"] }
-gio = { version = "0.21" }
-glib = { version = "0.21" }
-gtk = { package = "gtk4", version = "0.10", features = ["v4_16"] }
-log = { version = "0.4" }
-oneshot = { version = "0.1" }
+
+# Optional
 
 arrayvec     = { optional = true, version = "0.7", default-features = false }
 ash          = { optional = true, version = "0.38", default-features = false }
@@ -92,7 +102,7 @@ adw = { optional = true, package = "libadwaita", version = "0.8", features = [
 
 [dev-dependencies]
 bevy     = { version = "0.17.0-dev", features = ["wayland"] }
-bevy_gtk = { path = ".", features = ["adwaita", "blueprint"] }
+bevy_gtk = { path = ".", features = ["adwaita", "blueprint", "viewport"] }
 clap     = { version = "4.5", features = ["derive"] }
 
 [patch.crates-io]
