@@ -1,4 +1,5 @@
 use {
+    arrayvec::ArrayVec,
     ash::vk,
     bevy_ecs::error::BevyError,
     bevy_utils::default,
@@ -8,7 +9,20 @@ use {
     std::os::fd::{AsRawFd as _, FromRawFd, OwnedFd},
 };
 
-/// [`wgpu::Texture`] which is backed by Linux dmabuf memory.
+/// [`wgpu::Texture`] which is backed by DMA buffers.
+///
+/// See <https://docs.kernel.org/userspace-api/dma-buf-alloc-exchange.html> for
+/// documentation on Linux DMA buffers.
+// SAFETY: This struct stores a reference to a `wgpu::Texture` and
+// `vk::DeviceMemory` objects which are used by that texture. We use the memory
+// to open fds for creating GTK dmabuf textures, so the texture must outlive the
+// memory.
+// When the texture is dropped, a drop callback frees the device memory.
+// This struct always has at least 1 strong ref to the texture, so as long as
+// this struct is alive, both the texture and memory are alive.
+// It is safe for consumers to access the raw `wgpu::Texture`, since even if
+// they have the texture and drop the `DmabufTexture`, the memory won't be
+// dropped along with the `DmabufTexture`.
 #[derive(Debug, Clone, Deref)]
 pub struct DmabufTexture {
     #[debug(skip)]
@@ -17,10 +31,18 @@ pub struct DmabufTexture {
     vk_device: ash::Device,
     #[deref]
     wgpu_texture: wgpu::Texture,
+    drm_format: DrmFormat,
+    planes: ArrayVec<DmabufPlane, MAX_PLANES_U>,
+}
+
+const MAX_PLANES: u32 = 4;
+const MAX_PLANES_U: usize = MAX_PLANES as usize;
+
+#[derive(Debug, Clone)]
+struct DmabufPlane {
     #[debug(skip)]
     vk_memory: vk::DeviceMemory,
-    drm_format: DrmFormat,
-    // <https://docs.kernel.org/userspace-api/dma-buf-alloc-exchange.html#term-stride>
+    offset: u32,
     stride: u32,
 }
 
@@ -41,18 +63,49 @@ impl DmabufTexture {
         &self.wgpu_texture
     }
 
-    /// Opens a new file descriptor to the underlying dmabuf memory.
-    ///
-    /// The file descriptor (and therefore reference to the underlying dmabuf/
-    /// device memory) is owned by the caller. If the texture is dropped before
-    /// the file descriptor, the memory will stay allocated.
+    /// Builds a [`gdk::Texture`] backed by a file descriptor to this DMA
+    /// buffer.
     ///
     /// # Errors
     ///
-    /// See <https://registry.khronos.org/vulkan/specs/latest/man/html/vkGetMemoryFdKHR.html>.
-    pub fn open_fd(&self) -> Result<OwnedFd, BevyError> {
+    /// Errors if opening the plane file descriptors or building the
+    /// [`gdk::DmabufTexture`] fails.
+    pub fn build_gdk_texture(&self) -> Result<gdk::Texture, BevyError> {
+        let (width, height) = (self.width(), self.height());
+        let mut builder = gdk::DmabufTextureBuilder::new()
+            .set_width(width)
+            .set_height(height)
+            .set_fourcc(self.drm_format.code as u32)
+            .set_modifier(self.drm_format.modifier.into());
+
+        let mut plane_fds = ArrayVec::<_, MAX_PLANES_U>::new();
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "there should be no more than `u32::MAX` planes"
+        )]
+        {
+            builder = builder.set_n_planes(self.planes.len() as u32);
+            for (plane_index, plane) in self.planes.iter().enumerate() {
+                let plane_index = plane_index as u32;
+                let fd = self.open_fd(plane)?;
+                // SAFETY: we use `build_with_release_func` to:
+                // - move `fd` under the ownership of `gdk_texture`
+                // - close `fd` when `gdk_texture` is destroyed
+                builder = unsafe { builder.set_fd(plane_index, fd.as_raw_fd()) }
+                    .set_offset(plane_index, plane.offset)
+                    .set_stride(plane_index, plane.stride);
+                plane_fds.push(fd);
+            }
+        }
+
+        // SAFETY: I have no clue what the safety invariants are.
+        let gdk_texture = unsafe { builder.build_with_release_func(move || drop(plane_fds))? };
+        Ok(gdk_texture)
+    }
+
+    fn open_fd(&self, plane: &DmabufPlane) -> Result<OwnedFd, BevyError> {
         let get_fd_info = vk::MemoryGetFdInfoKHR {
-            memory: self.vk_memory,
+            memory: plane.vk_memory,
             handle_type: MEMORY_HANDLE_TYPE,
             ..default()
         };
@@ -66,39 +119,6 @@ impl DmabufTexture {
         //     Each call to vkGetMemoryFdKHR must create a new file descriptor...
         //
         Ok(unsafe { OwnedFd::from_raw_fd(raw_fd) })
-    }
-
-    /// Builds a [`gdk::Texture`] backed by a file descriptor to this DMA
-    /// buffer.
-    ///
-    /// # Errors
-    ///
-    /// Errors if [`DmabufTexture::open_fd`] or building the
-    /// [`gdk::DmabufTexture`] fail.
-    pub fn build_gdk_texture(&self) -> Result<gdk::Texture, BevyError> {
-        // The Gdk docs are completely useless for the parameters here.
-        // See the Linux userspace docs instead:
-        // <https://www.kernel.org/doc/html//latest/userspace-api/dma-buf-alloc-exchange.html>
-
-        let fd = self.open_fd()?;
-        let (width, height) = (self.width(), self.height());
-        let builder = gdk::DmabufTextureBuilder::new()
-            .set_width(width)
-            .set_height(height)
-            .set_fourcc(self.drm_format.code as u32)
-            .set_modifier(self.drm_format.modifier.into())
-            .set_n_planes(1);
-
-        // SAFETY: we use `build_with_release_func` to:
-        // - move `fd` under the ownership of `gdk_texture`
-        // - close `fd` when `gdk_texture` is destroyed
-        let builder = unsafe { builder.set_fd(0, fd.as_raw_fd()) }
-            .set_offset(0, 0)
-            .set_stride(0, self.stride);
-
-        // SAFETY: I have no clue what the safety invariants are.
-        let gdk_texture = unsafe { builder.build_with_release_func(move || drop(fd))? };
-        Ok(gdk_texture)
     }
 }
 
@@ -157,32 +177,49 @@ fn create_dmabuf_texture(
     let drm_format = format_to_fourcc(wgpu_format)
         .ok_or_else(|| format!("texture format {wgpu_format:?} cannot be mapped to a fourcc"))?;
 
-    let vk_image = unsafe { create_image(&dev, width, height, wgpu_format) }?;
-    let vk_memory = unsafe { allocate_memory(&dev, vk_image) }?;
-    unsafe { dev.vk_device.bind_image_memory(vk_image, vk_memory, 0) }?;
-
-    // when we create the image, we give the GPU a list of what DRM modifiers it
-    // *could* use, but which one it chooses is implementation-specific.
-    // after creating the image, we query which modifier it actually chose.
-    let drm_modifier = unsafe { get_image_drm_modifier(&dev, vk_image) }?;
-
+    // create an image with a potentially multi-planar layout
+    let (vk_image, drm_modifier, plane_count) =
+        unsafe { create_image(&dev, width, height, wgpu_format) }?;
     trace!(
-        "Using DRM format {drm_format}:0x{:016x} ({drm_modifier:?} vendor {:?})",
+        "Using DRM format {drm_format}:0x{:016x} with {plane_count} plane(s) ({drm_modifier:?} \
+         vendor {:?})",
         u64::from(drm_modifier),
         drm_modifier.vendor(),
     );
 
-    let wgpu_texture = vk_texture_to_wgpu(&dev, vk_image, vk_memory, width, height, wgpu_format);
+    let mut bind_image_memory = Vec::new();
+    let mut memory_offset = 0u64;
+    let mut plane_memories = ArrayVec::<_, MAX_PLANES_U>::new();
+    let mut planes = ArrayVec::<_, MAX_PLANES_U>::new();
+    for plane_index in 0..plane_count {
+        let (vk_memory, allocation_size) = unsafe { allocate_memory(&dev, vk_image, plane_index) }?;
+        bind_image_memory.push(vk::BindImageMemoryInfo {
+            image: vk_image,
+            memory: vk_memory,
+            memory_offset,
+            ..default()
+        });
+        plane_memories.push(vk_memory);
+        planes.push(DmabufPlane {
+            vk_memory,
+            offset: 0,
+            stride: width * 4, // TODO
+        });
+        memory_offset += allocation_size;
+    }
+    unsafe { dev.vk_device.bind_image_memory2(&bind_image_memory) }?;
+
+    let wgpu_texture =
+        vk_texture_to_wgpu(&dev, vk_image, plane_memories, width, height, wgpu_format);
     Ok(DmabufTexture {
         vk_instance: dev.vk_instance.clone(),
         vk_device: dev.vk_device.clone(),
         wgpu_texture,
-        vk_memory,
         drm_format: DrmFormat {
             code: drm_format,
             modifier: drm_modifier,
         },
-        stride: width * 4, // TODO
+        planes: ArrayVec::new(),
     })
 }
 
@@ -200,7 +237,13 @@ unsafe fn create_image(
     width: u32,
     height: u32,
     wgpu_format: wgpu::TextureFormat,
-) -> Result<vk::Image, BevyError> {
+) -> Result<(vk::Image, DrmModifier, u32), BevyError> {
+    #[derive(Debug, Clone, Copy)]
+    struct DrmModifierInfo {
+        modifier: DrmModifier,
+        plane_count: u32,
+    }
+
     let vk_format = dev.hal_adapter.texture_format_as_raw(wgpu_format);
 
     // for this texture format, figure out what DRM modifiers we can use
@@ -220,7 +263,7 @@ unsafe fn create_image(
 
     // then allocate a buffer for `drm_modifier_count` number of modifier props
     // and get info for those modifiers
-    let drm_modifiers = {
+    let drm_modifier_infos = {
         let mut buf = (0..drm_modifier_count)
             .map(|_| default())
             .collect::<Box<[_]>>();
@@ -238,50 +281,69 @@ unsafe fn create_image(
             );
         }
         buf.into_iter()
-            .map(|props| DrmModifier::from(props.drm_format_modifier))
+            .map(|props| DrmModifierInfo {
+                modifier: DrmModifier::from(props.drm_format_modifier),
+                plane_count: props.drm_format_modifier_plane_count,
+            })
             .collect::<Box<[_]>>()
     };
 
-    // TODO
-    let drm_modifiers = [DrmModifier::Linear];
-
     trace!("Available DRM format modifiers");
-    for modifier in &drm_modifiers {
+    for info in &drm_modifier_infos {
         trace!(
-            "- 0x{:016x} ({modifier:?} vendor {:?})",
-            u64::from(*modifier),
-            modifier.vendor()
+            "- 0x{:016x} with {} plane(s) ({:?} vendor {:?})",
+            u64::from(info.modifier),
+            info.plane_count,
+            info.modifier,
+            info.modifier.vendor(),
         );
     }
 
     // we tell the device that we can make an image with any of the above modifiers,
     // we're not picky
-    // let mut with_drm_modifiers = vk::ImageDrmFormatModifierListCreateInfoEXT {
-    //     drm_format_modifier_count: drm_modifiers.len() as u32,
-    //     p_drm_format_modifiers: drm_modifiers.as_ptr().cast(),
-    //     ..default()
-    // };
-
-    let plane_layouts = [vk::SubresourceLayout {
-        offset: 0,
-        size: 0,
-        row_pitch: u64::from(width * 4),
-        array_pitch: 0,
-        depth_pitch: 0,
-    }];
-    let mut with_drm_modifiers = vk::ImageDrmFormatModifierExplicitCreateInfoEXT {
-        drm_format_modifier: 0,
-        drm_format_modifier_plane_count: 1,
-        p_plane_layouts: (&raw const plane_layouts).cast(),
+    let drm_modifiers = drm_modifier_infos
+        .iter()
+        .map(|info| u64::from(info.modifier))
+        .collect::<Box<[_]>>();
+    let mut with_drm_modifiers = vk::ImageDrmFormatModifierListCreateInfoEXT {
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "there will be no more than `u32::MAX` modifiers"
+        )]
+        drm_format_modifier_count: drm_modifiers.len() as u32,
+        p_drm_format_modifiers: drm_modifiers.as_ptr(),
         ..default()
     };
-
     // our image can be backed by external memory
     let mut with_external_memory = vk::ExternalMemoryImageCreateInfo {
         handle_types: MEMORY_HANDLE_TYPE,
         ..default()
     };
     let params = vk::ImageCreateInfo {
+        flags:
+            // When we import a dmabuf from GTK, we need to specify what planes the
+            // contents are in. Each plane is opened as a unique fd, which means a
+            // unique memory allocation.
+            // If we kept this image as non-disjoint, then we would only be able to
+            // use linear modifiers, which would make the code simpler but is less
+            // efficient for the device.
+            vk::ImageCreateFlags::DISJOINT
+            // This prevents validation errors when creating a single-planar image
+            // with the `DISJOINT` flag.
+            //
+            // <https://registry.khronos.org/vulkan/specs/latest/man/html/VkImageCreateFlagBits.html>
+            // `VK_IMAGE_CREATE_ALIAS_BIT`
+            //
+            //     This flag further specifies that [...] a single-plane image
+            //     can share an in-memory non-linear representation with a plane
+            //     of a multi-planar disjoint image [...]
+            //
+            //     If the pNext chain includes a VkExternalMemoryImageCreateInfo
+            //     or VkExternalMemoryImageCreateInfoNV structure whose
+            //     handleTypes member is not 0 [which we do], it is as if
+            //     `VK_IMAGE_CREATE_ALIAS_BIT` is set.
+            //
+            | vk::ImageCreateFlags::ALIAS,
         image_type: VK_DIM,
         format: vk_format,
         extent: vk::Extent3D {
@@ -300,36 +362,76 @@ unsafe fn create_image(
     }
     .push_next(&mut with_drm_modifiers)
     .push_next(&mut with_external_memory);
-    Ok(unsafe { dev.vk_device.create_image(&params, None) }?)
-}
+    let vk_image = unsafe { dev.vk_device.create_image(&params, None) }?;
 
-unsafe fn get_image_drm_modifier(
-    dev: &Devices,
-    vk_image: vk::Image,
-) -> Result<DrmModifier, BevyError> {
-    let mut out = vk::ImageDrmFormatModifierPropertiesEXT::default();
-    let device = ash::ext::image_drm_format_modifier::Device::new(dev.vk_instance, dev.vk_device);
-    unsafe { device.get_image_drm_format_modifier_properties(vk_image, &mut out) }?;
-    Ok(DrmModifier::from(out.drm_format_modifier))
+    // when we create the image, we give the GPU a list of what DRM modifiers it
+    // *could* use, but which one it chooses is implementation-specific.
+    // after creating the image, we query which modifier it actually chose.
+    let drm_modifier = {
+        let mut out = vk::ImageDrmFormatModifierPropertiesEXT::default();
+        let device =
+            ash::ext::image_drm_format_modifier::Device::new(dev.vk_instance, dev.vk_device);
+        unsafe { device.get_image_drm_format_modifier_properties(vk_image, &mut out) }?;
+        DrmModifier::from(out.drm_format_modifier)
+    };
+
+    let drm_modifier_info = drm_modifier_infos
+        .iter()
+        .find(|info| info.modifier == drm_modifier)
+        .unwrap_or_else(|| {
+            panic!(
+                "created an image with DRM modifier {drm_modifier:?}, but this was not in the \
+                 initial modifier list - Vulkan driver bug?"
+            )
+        });
+
+    Ok((
+        vk_image,
+        drm_modifier_info.modifier,
+        drm_modifier_info.plane_count,
+    ))
 }
 
 unsafe fn allocate_memory(
     dev: &Devices,
     vk_image: vk::Image,
-) -> Result<vk::DeviceMemory, BevyError> {
+    plane_index: u32,
+) -> Result<(vk::DeviceMemory, u64), BevyError> {
+    // <https://www.reddit.com/r/vulkan/comments/11r29hb/what_are_the_different_memory_allocation/>
+
+    let plane_aspect = match plane_index {
+        0 => vk::ImageAspectFlags::MEMORY_PLANE_0_EXT,
+        1 => vk::ImageAspectFlags::MEMORY_PLANE_1_EXT,
+        2 => vk::ImageAspectFlags::MEMORY_PLANE_2_EXT,
+        3 => vk::ImageAspectFlags::MEMORY_PLANE_3_EXT,
+        _ => panic!("there should be no more than 4 memory planes"),
+    };
+
     // ask the device what memory specs (size etc.) are required for this image
     let memory_requirements = {
+        let mut plane_params = vk::ImagePlaneMemoryRequirementsInfo {
+            plane_aspect,
+            ..default()
+        };
         let params = vk::ImageMemoryRequirementsInfo2 {
             image: vk_image,
             ..default()
-        };
+        }
+        .push_next(&mut plane_params);
         let mut out = vk::MemoryRequirements2::default();
+        println!("out1 = {out:?}");
         unsafe {
             dev.vk_device
                 .get_image_memory_requirements2(&params, &mut out);
         }
+        println!("out2 = {out:?}");
         out.memory_requirements
     };
+
+    trace!(
+        "Memory requirements for plane {plane_index}: size {} align {}",
+        memory_requirements.size, memory_requirements.alignment
+    );
 
     // ask the device what memory types it has
     let memory_props = {
@@ -374,20 +476,23 @@ unsafe fn allocate_memory(
         ..default()
     };
 
+    let allocation_size = memory_requirements.size;
     let params = vk::MemoryAllocateInfo {
-        allocation_size: memory_requirements.size,
+        allocation_size,
         memory_type_index,
         ..default()
     }
-    .push_next(&mut with_export)
-    .push_next(&mut with_dedicated);
-    Ok(unsafe { dev.vk_device.allocate_memory(&params, None) }?)
+    .push_next(&mut with_export);
+    // .push_next(&mut with_dedicated);
+    let vk_memory = unsafe { dev.vk_device.allocate_memory(&params, None) }?;
+
+    Ok((vk_memory, allocation_size))
 }
 
 fn vk_texture_to_wgpu(
     dev: &Devices,
     vk_image: vk::Image,
-    vk_memory: vk::DeviceMemory,
+    plane_memory: ArrayVec<vk::DeviceMemory, MAX_PLANES_U>,
     width: u32,
     height: u32,
     wgpu_format: wgpu::TextureFormat,
@@ -412,7 +517,9 @@ fn vk_texture_to_wgpu(
             let vk_device = dev.vk_device.clone();
             Box::new(move || unsafe {
                 vk_device.destroy_image(vk_image, None);
-                vk_device.free_memory(vk_memory, None);
+                for vk_memory in plane_memory {
+                    vk_device.free_memory(vk_memory, None);
+                }
             })
         };
         // SAFETY:

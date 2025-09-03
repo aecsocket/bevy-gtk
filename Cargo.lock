@@ -801,6 +801,7 @@ dependencies = [
 name = "bevy_gtk"
 version = "0.1.0"
 dependencies = [
+ "arrayvec",
  "ash",
  "async-channel",
  "atomic_float",

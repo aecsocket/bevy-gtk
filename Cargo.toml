@@ -38,6 +38,7 @@ adwaita = ["dep:adw"]
 blueprint = ["gtk/blueprint"]
 render = [
   "bevy_render/raw_vulkan_init",
+  "dep:arrayvec",
   "dep:ash",
   "dep:atomic_float",
   "dep:atomicbox",
@@ -72,6 +73,7 @@ gtk = { package = "gtk4", version = "0.10", features = ["v4_16"] }
 log = { version = "0.4" }
 oneshot = { version = "0.1" }
 
+arrayvec     = { optional = true, version = "0.7", default-features = false }
 ash          = { optional = true, version = "0.38", default-features = false }
 atomic_float = { optional = true, version = "1.1" }
 atomicbox    = { optional = true, version = "0.4" }
